@@ -1,6 +1,7 @@
-import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
+import type { Pool, QueryResult, QueryResultRow } from "pg";
 
 export type AuditAction =
+  | "organization.created"
   | "auth.signup"
   | "auth.email_verified"
   | "auth.login_succeeded"
@@ -154,8 +155,16 @@ export class TransactionalAuditLog {
     await this.execute(event, async () => undefined);
   }
 
+  async recordInTransaction(
+    transaction: AuditTransaction,
+    event: AuditEventInput,
+  ): Promise<void> {
+    validateEvent(event);
+    await this.#insert(transaction, event, metadataFor(event));
+  }
+
   async #insert(
-    client: PoolClient,
+    client: AuditTransaction,
     event: AuditEventInput,
     metadata: Record<string, SafeMetadataValue>,
   ): Promise<void> {
