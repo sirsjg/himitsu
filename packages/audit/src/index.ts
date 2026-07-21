@@ -22,7 +22,8 @@ export type AuditAction =
   | "membership.invited"
   | "membership.accepted"
   | "membership.removed"
-  | "membership.role_changed";
+  | "membership.role_changed"
+  | "membership.project_role_changed";
 
 export type AuditActor =
   | { readonly type: "user"; readonly id: string }
