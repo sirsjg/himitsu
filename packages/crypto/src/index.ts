@@ -4,7 +4,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 
 const ALGORITHM = "aes-256-gcm" as const;
 const KEY_BYTES = 32;
@@ -314,6 +314,91 @@ export class PostgresDataKeyStore implements DataKeyStore {
 
   async #selectActive(client: PoolClient, orgId: string): Promise<DataKeyRecord | null> {
     const result = await client.query<DataKeyRow>(
+      `SELECT org_id, version, status, kek_id, wrapped_dek, wrap_nonce, wrap_tag, created_at, retired_at
+       FROM org_encryption_keys WHERE org_id = $1 AND status = 'active'`,
+      [orgId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : recordFromRow(row);
+  }
+}
+
+export interface DataKeyTransaction {
+  query<Row extends QueryResultRow = QueryResultRow>(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<QueryResult<Row>>;
+}
+
+/**
+ * A data-key store bound to an existing database transaction. This is the
+ * adapter used by tenant-scoped writes so key activation and encrypted data
+ * commit or roll back together under the caller's RLS context.
+ */
+export class PostgresTransactionDataKeyStore implements DataKeyStore {
+  readonly #transaction: DataKeyTransaction;
+
+  constructor(transaction: DataKeyTransaction) {
+    this.#transaction = transaction;
+  }
+
+  async getActive(orgId: string): Promise<DataKeyRecord | null> {
+    return this.#selectActive(orgId);
+  }
+
+  async getVersion(orgId: string, version: number): Promise<DataKeyRecord | null> {
+    const result = await this.#transaction.query<DataKeyRow>(
+      `SELECT org_id, version, status, kek_id, wrapped_dek, wrap_nonce, wrap_tag, created_at, retired_at
+       FROM org_encryption_keys WHERE org_id = $1 AND version = $2`,
+      [orgId, version],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : recordFromRow(row);
+  }
+
+  async ensureActive(orgId: string, factory: WrappedKeyFactory): Promise<DataKeyRecord> {
+    return this.#activate(orgId, factory, true);
+  }
+
+  async rotate(orgId: string, factory: WrappedKeyFactory): Promise<DataKeyRecord> {
+    return this.#activate(orgId, factory, false);
+  }
+
+  async #activate(
+    orgId: string,
+    factory: WrappedKeyFactory,
+    useExisting: boolean,
+  ): Promise<DataKeyRecord> {
+    await this.#transaction.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [orgId]);
+    if (useExisting) {
+      const existing = await this.#selectActive(orgId);
+      if (existing !== null) return existing;
+    }
+    const versionResult = await this.#transaction.query<{ version: number }>(
+      "SELECT COALESCE(max(version), 0)::integer + 1 AS version FROM org_encryption_keys WHERE org_id = $1",
+      [orgId],
+    );
+    const version = versionResult.rows[0]?.version;
+    if (version === undefined) throw new Error("Unable to allocate a data-key version");
+    const wrapped = await factory(version);
+    await this.#transaction.query(
+      "UPDATE org_encryption_keys SET status = 'retired', retired_at = now() WHERE org_id = $1 AND status = 'active'",
+      [orgId],
+    );
+    const inserted = await this.#transaction.query<DataKeyRow>(
+      `INSERT INTO org_encryption_keys
+        (org_id, version, status, kek_id, wrapped_dek, wrap_nonce, wrap_tag)
+       VALUES ($1, $2, 'active', $3, $4, $5, $6)
+       RETURNING org_id, version, status, kek_id, wrapped_dek, wrap_nonce, wrap_tag, created_at, retired_at`,
+      [orgId, version, wrapped.kekId, wrapped.ciphertext, wrapped.nonce, wrapped.authTag],
+    );
+    const row = inserted.rows[0];
+    if (row === undefined) throw new Error("Data-key insertion returned no record");
+    return recordFromRow(row);
+  }
+
+  async #selectActive(orgId: string): Promise<DataKeyRecord | null> {
+    const result = await this.#transaction.query<DataKeyRow>(
       `SELECT org_id, version, status, kek_id, wrapped_dek, wrap_nonce, wrap_tag, created_at, retired_at
        FROM org_encryption_keys WHERE org_id = $1 AND status = 'active'`,
       [orgId],
