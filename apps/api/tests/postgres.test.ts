@@ -1,0 +1,285 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { after, before, test } from "node:test";
+import { TransactionalAuditLog } from "@himitsu/audit";
+import { AuthorizationContextResolver } from "@himitsu/authz";
+import { LocalMasterKey } from "@himitsu/crypto";
+import { EnvironmentService } from "@himitsu/environments";
+import { ProjectService } from "@himitsu/projects";
+import { SecretService } from "@himitsu/secrets";
+import { TenantDatabase } from "@himitsu/tenancy";
+import { Pool } from "pg";
+import { buildApi } from "../src/index.js";
+
+const adminConnectionString = process.env.TEST_DATABASE_URL;
+const appConnectionString = process.env.TEST_APP_DATABASE_URL;
+if (adminConnectionString === undefined || appConnectionString === undefined) {
+  throw new Error("TEST_DATABASE_URL and TEST_APP_DATABASE_URL are required");
+}
+
+const adminPool = new Pool({ connectionString: adminConnectionString, max: 2 });
+const appPool = new Pool({ connectionString: appConnectionString, max: 10 });
+const database = new TenantDatabase(appPool);
+const audit = new TransactionalAuditLog(appPool);
+const resolver = new AuthorizationContextResolver();
+const ownerA = randomUUID();
+const memberA = randomUUID();
+const ownerB = randomUUID();
+const orgA = randomUUID();
+const orgB = randomUUID();
+const projects = new ProjectService(resolver, audit);
+const environments = new EnvironmentService(resolver, audit);
+const secrets = new SecretService(
+  resolver,
+  audit,
+  new LocalMasterKey("api-integration-v1", Buffer.alloc(32, 9)),
+);
+const app = await buildApi({
+  database,
+  projects,
+  environments,
+  secrets,
+  resolveRequestContext: (request) => ({
+    orgId: typeof request.headers["x-test-org-id"] === "string" ? request.headers["x-test-org-id"] : "",
+    userId: typeof request.headers["x-test-user-id"] === "string" ? request.headers["x-test-user-id"] : "",
+  }),
+});
+
+const headers = (orgId: string, userId: string) => ({
+  "x-test-org-id": orgId,
+  "x-test-user-id": userId,
+});
+
+before(async () => {
+  await adminPool.query(
+    `INSERT INTO users (id, email, email_verified_at) VALUES
+      ($1, 'api-owner-a@example.com', now()), ($2, 'api-member-a@example.com', now()),
+      ($3, 'api-owner-b@example.com', now())`,
+    [ownerA, memberA, ownerB],
+  );
+  await adminPool.query(
+    "INSERT INTO organizations (id, name, slug) VALUES ($1, 'API Alpha', 'api-alpha'), ($2, 'API Beta', 'api-beta')",
+    [orgA, orgB],
+  );
+  await adminPool.query(
+    `INSERT INTO memberships (org_id, user_id, role) VALUES
+      ($1, $2, 'owner'), ($1, $3, 'member'), ($4, $5, 'owner')`,
+    [orgA, ownerA, memberA, orgB, ownerB],
+  );
+});
+
+after(async () => {
+  await app.close();
+  await appPool.end();
+  await adminPool.end();
+});
+
+test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
+  const response = await app.inject({ method: "GET", url: "/api/v1/openapi.json" });
+  assert.equal(response.statusCode, 200);
+  const document = response.json() as {
+    openapi: string;
+    paths: Record<string, Record<string, { operationId?: string }>>;
+  };
+  assert.equal(document.openapi, "3.1.0");
+  for (const path of [
+    "/api/v1/projects",
+    "/api/v1/projects/{projectId}/environments",
+    "/api/v1/projects/{projectId}/environments/{environmentId}/secrets/bulk-get",
+    "/api/v1/secrets/{secretId}/versions",
+    "/api/v1/tags",
+  ]) assert.ok(document.paths[path], `OpenAPI path missing: ${path}`);
+  const operationIds = Object.values(document.paths).flatMap((methods) =>
+    Object.values(methods).map(({ operationId }) => operationId).filter(Boolean),
+  );
+  assert.equal(new Set(operationIds).size, operationIds.length);
+  const projectCreate = document.paths["/api/v1/projects"]?.post as unknown as {
+    responses: { "2XX": { content: { "application/json": { schema: { properties: { data: { properties: Record<string, unknown> } } } } } } };
+  };
+  assert.ok(projectCreate.responses["2XX"].content["application/json"].schema.properties.data.properties.id);
+  const secretRead = document.paths["/api/v1/secrets/{secretId}"]?.get as unknown as {
+    responses: { "2XX": { content: { "application/json": { schema: { properties: { data: { properties: Record<string, unknown> } } } } } } };
+  };
+  assert.ok(secretRead.responses["2XX"].content["application/json"].schema.properties.data.properties.value);
+});
+
+test("returns stable validation and authentication error envelopes", async () => {
+  const unauthenticated = await app.inject({ method: "GET", url: "/api/v1/projects" });
+  assert.equal(unauthenticated.statusCode, 401);
+  assert.deepEqual(Object.keys(unauthenticated.json().error).sort(), ["code", "message", "requestId"]);
+  assert.equal(unauthenticated.json().error.code, "UNAUTHENTICATED");
+
+  const invalid = await app.inject({
+    method: "POST",
+    url: "/api/v1/projects",
+    headers: headers(orgA, ownerA),
+    payload: { slug: "missing-name" },
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(invalid.json().error.code, "INVALID_REQUEST");
+  assert.ok(invalid.json().error.requestId);
+});
+
+let projectId: string;
+let developmentId: string;
+let productionId: string;
+let secretId: string;
+let tagId: string;
+
+test("exposes paginated project, environment, and tag CRUD", async () => {
+  const createdTag = await app.inject({
+    method: "POST", url: "/api/v1/tags", headers: headers(orgA, ownerA),
+    payload: { name: " database ", color: "#aabbcc" },
+  });
+  assert.equal(createdTag.statusCode, 201, createdTag.body);
+  tagId = createdTag.json().data.id;
+  assert.equal(createdTag.json().data.color, "#AABBCC");
+
+  const createdProject = await app.inject({
+    method: "POST", url: "/api/v1/projects", headers: headers(orgA, ownerA),
+    payload: { name: "API Project", slug: "api-project", tagIds: [tagId] },
+  });
+  assert.equal(createdProject.statusCode, 201, createdProject.body);
+  projectId = createdProject.json().data.id;
+  assert.deepEqual(createdProject.json().data.tagIds, [tagId]);
+
+  const listed = await app.inject({
+    method: "GET", url: "/api/v1/projects?limit=1&offset=0", headers: headers(orgA, memberA),
+  });
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.equal(listed.json().data.length, 1);
+  assert.deepEqual(listed.json().meta, { limit: 1, offset: 0, total: 1 });
+
+  const environmentList = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments`,
+    headers: headers(orgA, memberA),
+  });
+  assert.equal(environmentList.statusCode, 200, environmentList.body);
+  assert.deepEqual(environmentList.json().data.map(({ slug }: { slug: string }) => slug), [
+    "development", "staging", "production",
+  ]);
+  developmentId = environmentList.json().data.find(({ slug }: { slug: string }) => slug === "development").id;
+  productionId = environmentList.json().data.find(({ slug }: { slug: string }) => slug === "production").id;
+
+  const custom = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments`,
+    headers: headers(orgA, memberA),
+    payload: { name: "Preview", slug: "preview" },
+  });
+  assert.equal(custom.statusCode, 201, custom.body);
+  const ids = [custom.json().data.id, ...environmentList.json().data.map(({ id }: { id: string }) => id)];
+  const reordered = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/reorder`,
+    headers: headers(orgA, ownerA),
+    payload: { environmentIds: ids },
+  });
+  assert.equal(reordered.statusCode, 200, reordered.body);
+  assert.deepEqual(reordered.json().data.map(({ id }: { id: string }) => id), ids);
+
+  const tags = await app.inject({ method: "GET", url: "/api/v1/tags?limit=1", headers: headers(orgA, memberA) });
+  assert.equal(tags.statusCode, 200, tags.body);
+  assert.equal(tags.json().meta.total, 1);
+  const updatedTag = await app.inject({
+    method: "PATCH", url: `/api/v1/tags/${tagId}`, headers: headers(orgA, ownerA),
+    payload: { name: "datastore" },
+  });
+  assert.equal(updatedTag.statusCode, 200, updatedTag.body);
+  assert.equal(updatedTag.json().data.name, "datastore");
+});
+
+test("exposes secret create, update, bulk set/get, delete, and version metadata", async () => {
+  const created = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: headers(orgA, memberA),
+    payload: { key: "DATABASE_URL", value: "postgres://api-first", notes: "API test" },
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  secretId = created.json().data.id;
+  assert.equal(created.json().data.currentVersion, 1);
+
+  const updated = await app.inject({
+    method: "PATCH", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA),
+    payload: { value: "postgres://api-second", changeNote: "API rotation" },
+  });
+  assert.equal(updated.statusCode, 200, updated.body);
+  assert.equal(updated.json().data.currentVersion, 2);
+
+  const bulkSet = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/bulk`,
+    headers: headers(orgA, memberA),
+    payload: { secrets: [
+      { key: "CACHE_URL", value: "redis://api" },
+      { key: "FEATURE_FLAG", value: "on" },
+    ] },
+  });
+  assert.equal(bulkSet.statusCode, 200, bulkSet.body);
+  assert.equal(bulkSet.json().data.length, 2);
+
+  const bulkGet = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/bulk-get`,
+    headers: headers(orgA, memberA),
+    payload: { keys: ["DATABASE_URL", "FEATURE_FLAG"] },
+  });
+  assert.equal(bulkGet.statusCode, 200, bulkGet.body);
+  assert.deepEqual(bulkGet.json().data, { DATABASE_URL: "postgres://api-second", FEATURE_FLAG: "on" });
+
+  const versions = await app.inject({
+    method: "GET", url: `/api/v1/secrets/${secretId}/versions?limit=1`, headers: headers(orgA, memberA),
+  });
+  assert.equal(versions.statusCode, 200, versions.body);
+  assert.equal(versions.json().meta.total, 2);
+  assert.equal(versions.json().data[0].version, 2);
+  assert.equal(versions.json().data[0].current, true);
+  assert.equal("value" in versions.json().data[0], false);
+
+  const read = await app.inject({ method: "GET", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA) });
+  assert.equal(read.statusCode, 200, read.body);
+  assert.equal(read.json().data.value, "postgres://api-second");
+
+  const deleted = await app.inject({ method: "DELETE", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA) });
+  assert.equal(deleted.statusCode, 200, deleted.body);
+  const missing = await app.inject({ method: "GET", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA) });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.code, "NOT_FOUND");
+});
+
+test("maps RBAC and tenant isolation failures to non-leaking HTTP errors", async () => {
+  const protectedWrite = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/secrets`,
+    headers: headers(orgA, memberA),
+    payload: { key: "PROTECTED", value: "denied" },
+  });
+  assert.equal(protectedWrite.statusCode, 403, protectedWrite.body);
+  assert.equal(protectedWrite.json().error.code, "FORBIDDEN");
+
+  const crossTenant = await app.inject({
+    method: "GET", url: `/api/v1/projects/${projectId}`, headers: headers(orgB, ownerB),
+  });
+  assert.equal(crossTenant.statusCode, 404, crossTenant.body);
+  assert.equal(crossTenant.json().error.code, "NOT_FOUND");
+
+  const memberTagWrite = await app.inject({
+    method: "POST", url: "/api/v1/tags", headers: headers(orgA, memberA),
+    payload: { name: "denied", color: "#112233" },
+  });
+  assert.equal(memberTagWrite.statusCode, 403);
+});
+
+test("deletes tags and projects through their v1 lifecycle endpoints", async () => {
+  const deletedTag = await app.inject({
+    method: "DELETE", url: `/api/v1/tags/${tagId}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(deletedTag.statusCode, 200, deletedTag.body);
+  const deletedProject = await app.inject({
+    method: "DELETE", url: `/api/v1/projects/${projectId}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(deletedProject.statusCode, 200, deletedProject.body);
+  assert.ok(deletedProject.json().data.deletedAt);
+});

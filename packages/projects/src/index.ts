@@ -210,6 +210,15 @@ export class ProjectService {
     return fromRow(row);
   }
 
+  async getById(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    projectId: string,
+    includeDeleted = false,
+  ): Promise<Project> {
+    return this.#getById(transaction, actorUserId, projectId, includeDeleted);
+  }
+
   async list(transaction: TenantTransaction, actorUserId: string): Promise<readonly Project[]> {
     requirePermission(await this.#resolver.resolve(transaction, actorUserId), "project.read");
     const result = await transaction.query<ProjectRow>(

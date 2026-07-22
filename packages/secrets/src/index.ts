@@ -44,6 +44,15 @@ export interface SecretWithValue extends SecretMetadata {
   readonly value: string;
 }
 
+export interface SecretVersionMetadata {
+  readonly version: number;
+  readonly authorUserId: string | null;
+  readonly changeNote: string | null;
+  readonly encryptionKeyVersion: number;
+  readonly createdAt: Date;
+  readonly current: boolean;
+}
+
 export interface SetSecretInput {
   readonly key: string;
   readonly value: string;
@@ -205,6 +214,43 @@ export class SecretService {
       plaintext.fill(0);
       encryption.clearKeyCache();
     }
+  }
+
+  async listVersions(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    secretId: string,
+  ): Promise<readonly SecretVersionMetadata[]> {
+    const secret = await this.#metadataRow(transaction, secretId);
+    const environment = await this.#environment(transaction, secret.project_id, secret.environment_id);
+    requirePermission(
+      await this.#resolver.resolve(
+        transaction,
+        actorUserId,
+        secret.project_id,
+        environment.protected,
+      ),
+      "secret.read",
+    );
+    const result = await transaction.query<{
+      version: number;
+      author_user_id: string | null;
+      change_note: string | null;
+      encryption_key_version: number;
+      created_at: Date;
+    }>(
+      `SELECT version, author_user_id, change_note, encryption_key_version, created_at
+       FROM secret_versions WHERE secret_id = $1 ORDER BY version DESC`,
+      [secretId],
+    );
+    return result.rows.map((row) => ({
+      version: row.version,
+      authorUserId: row.author_user_id,
+      changeNote: row.change_note,
+      encryptionKeyVersion: row.encryption_key_version,
+      createdAt: row.created_at,
+      current: row.version === secret.current_version,
+    }));
   }
 
   async create(

@@ -123,6 +123,15 @@ export class EnvironmentService {
     return result.rows.map(fromRow);
   }
 
+  async get(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    environmentId: string,
+    includeDeleted = false,
+  ): Promise<Environment> {
+    return this.#get(transaction, actorUserId, environmentId, includeDeleted);
+  }
+
   async create(
     transaction: TenantTransaction,
     actorUserId: string,
