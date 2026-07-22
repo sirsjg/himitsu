@@ -1,0 +1,12 @@
+BEGIN;
+DROP POLICY IF EXISTS tenant_isolation ON project_tags;
+ALTER TABLE project_tags NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE project_tags DISABLE ROW LEVEL SECURITY;
+DROP TABLE IF EXISTS project_tags;
+ALTER TABLE secrets DROP CONSTRAINT IF EXISTS secrets_project_deletion_check;
+ALTER TABLE secrets DROP COLUMN IF EXISTS deleted_by_project_at;
+ALTER TABLE environments DROP CONSTRAINT IF EXISTS environments_project_deletion_check;
+ALTER TABLE environments DROP COLUMN IF EXISTS deleted_by_project_at;
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_deletion_window_check;
+ALTER TABLE projects DROP COLUMN IF EXISTS purge_after;
+COMMIT;
