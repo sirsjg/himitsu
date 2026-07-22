@@ -14,7 +14,8 @@ export class AuthError extends Error {
     | "EMAIL_NOT_VERIFIED"
     | "INVALID_TOKEN"
     | "INVALID_SESSION"
-    | "INVALID_CSRF";
+    | "INVALID_CSRF"
+    | "RATE_LIMITED";
 
   constructor(code: AuthError["code"], message: string) {
     super(message);
@@ -31,6 +32,73 @@ export interface TokenDelivery {
 export interface ClientContext {
   readonly ip?: string;
   readonly userAgent?: string;
+}
+
+export interface LoginAttemptLimiterOptions {
+  readonly maxFailures?: number;
+  readonly windowMs?: number;
+  readonly now?: () => number;
+}
+
+interface LoginAttemptBucket {
+  failures: number;
+  resetAt: number;
+}
+
+export class LoginAttemptLimiter {
+  readonly #maxFailures: number;
+  readonly #windowMs: number;
+  readonly #now: () => number;
+  readonly #buckets = new Map<string, LoginAttemptBucket>();
+  #operations = 0;
+
+  constructor(options: LoginAttemptLimiterOptions = {}) {
+    this.#maxFailures = positiveInteger(options.maxFailures ?? 5, "Maximum login failures");
+    this.#windowMs = positiveInteger(options.windowMs ?? 15 * 60 * 1000, "Login failure window");
+    this.#now = options.now ?? Date.now;
+  }
+
+  isBlocked(identities: readonly string[]): boolean {
+    const now = this.#now();
+    return identities.some((identity) => {
+      const bucket = this.#buckets.get(identity);
+      if (bucket === undefined) return false;
+      if (bucket.resetAt <= now) {
+        this.#buckets.delete(identity);
+        return false;
+      }
+      return bucket.failures >= this.#maxFailures;
+    });
+  }
+
+  recordFailure(identities: readonly string[]): boolean {
+    const now = this.#now();
+    for (const identity of identities) {
+      const existing = this.#buckets.get(identity);
+      const bucket = existing === undefined || existing.resetAt <= now
+        ? { failures: 0, resetAt: now + this.#windowMs }
+        : existing;
+      bucket.failures += 1;
+      this.#buckets.set(identity, bucket);
+    }
+    this.#operations += identities.length;
+    if (this.#operations >= 1000) {
+      for (const [identity, bucket] of this.#buckets) {
+        if (bucket.resetAt <= now) this.#buckets.delete(identity);
+      }
+      this.#operations = 0;
+    }
+    return this.isBlocked(identities);
+  }
+
+  clear(identities: readonly string[]): void {
+    for (const identity of identities) this.#buckets.delete(identity);
+  }
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
 }
 
 export interface SessionCredentials {
@@ -153,12 +221,18 @@ export class AuthService {
   readonly #delivery: TokenDelivery;
   readonly #hasher: PasswordHasher;
   readonly #now: () => Date;
+  readonly #loginAttempts: LoginAttemptLimiter;
 
-  constructor(pool: Pool, delivery: TokenDelivery, options: { hasher?: PasswordHasher; now?: () => Date } = {}) {
+  constructor(
+    pool: Pool,
+    delivery: TokenDelivery,
+    options: { hasher?: PasswordHasher; now?: () => Date; loginAttempts?: LoginAttemptLimiter } = {},
+  ) {
     this.#pool = pool;
     this.#delivery = delivery;
     this.#hasher = options.hasher ?? new PasswordHasher();
     this.#now = options.now ?? (() => new Date());
+    this.#loginAttempts = options.loginAttempts ?? new LoginAttemptLimiter();
   }
 
   async signup(email: string, password: string): Promise<{ userId: string }> {
@@ -200,14 +274,25 @@ export class AuthService {
 
   async login(email: string, password: string, context: ClientContext = {}): Promise<SessionCredentials> {
     const normalized = normalizeEmail(email);
+    const loginIdentities = [
+      `account:${createHash("sha256").update(normalized, "utf8").digest("hex")}`,
+      ...(context.ip === undefined ? [] : [`ip:${context.ip}`]),
+    ];
+    if (this.#loginAttempts.isBlocked(loginIdentities)) {
+      throw new AuthError("RATE_LIMITED", "Too many login attempts; try again later");
+    }
     const result = await this.#pool.query<UserRow>(
       "SELECT id, email, password_hash, email_verified_at FROM users WHERE email_normalized = $1 AND disabled_at IS NULL",
       [normalized],
     );
     const user = result.rows[0];
     if (user === undefined || !user.password_hash || !(await this.#hasher.verify(user.password_hash, password))) {
+      if (this.#loginAttempts.recordFailure(loginIdentities)) {
+        throw new AuthError("RATE_LIMITED", "Too many login attempts; try again later");
+      }
       throw new AuthError("INVALID_CREDENTIALS", "Invalid email or password");
     }
+    this.#loginAttempts.clear(loginIdentities);
     if (user.email_verified_at === null) {
       throw new AuthError("EMAIL_NOT_VERIFIED", "Email verification is required");
     }

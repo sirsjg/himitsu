@@ -11,7 +11,7 @@ import { ProjectService } from "@himitsu/projects";
 import { SecretService } from "@himitsu/secrets";
 import { TenantDatabase } from "@himitsu/tenancy";
 import { Pool } from "pg";
-import { apiRoutePermissions, buildApi } from "../src/index.js";
+import { apiRoutePermissions, buildApi, securityHeaders } from "../src/index.js";
 
 const adminConnectionString = process.env.TEST_DATABASE_URL;
 const appConnectionString = process.env.TEST_APP_DATABASE_URL;
@@ -135,6 +135,9 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
     paths: Record<string, Record<string, { operationId?: string }>>;
   };
   assert.equal(document.openapi, "3.1.0");
+  for (const [name, value] of Object.entries(securityHeaders)) {
+    assert.equal(response.headers[name], value, `Security header missing: ${name}`);
+  }
   for (const path of [
     "/api/v1/projects",
     "/api/v1/projects/{projectId}/environments",

@@ -104,3 +104,20 @@ test("password reset is enumeration-safe, single-use, and revokes sessions", asy
   const newSession = await auth.login("person@example.com", "replacement password phrase");
   assert.equal((await auth.authenticate(newSession.sessionToken)).email, "person@example.com");
 });
+
+test("throttles repeated password guesses before another Argon2 verification", async () => {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    await assert.rejects(
+      auth.login("person@example.com", `incorrect password ${attempt}`, { ip: "198.51.100.44" }),
+      (error: unknown) => error instanceof AuthError && error.code === "INVALID_CREDENTIALS",
+    );
+  }
+  await assert.rejects(
+    auth.login("person@example.com", "incorrect password 5", { ip: "198.51.100.44" }),
+    (error: unknown) => error instanceof AuthError && error.code === "RATE_LIMITED",
+  );
+  await assert.rejects(
+    auth.login("person@example.com", "replacement password phrase", { ip: "198.51.100.44" }),
+    (error: unknown) => error instanceof AuthError && error.code === "RATE_LIMITED",
+  );
+});

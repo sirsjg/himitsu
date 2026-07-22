@@ -215,6 +215,18 @@ export const apiRoutePermissions = Object.freeze({
   revokeApiKey: "api_key.revoke",
 } satisfies Readonly<Record<string, Permission>>);
 
+export const securityHeaders = Object.freeze({
+  "cache-control": "no-store",
+  "content-security-policy": "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+  "permissions-policy": "camera=(), geolocation=(), microphone=()",
+  "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+} as const);
+
 export interface RateLimitDecision {
   readonly allowed: boolean;
   readonly limit: number;
@@ -427,6 +439,11 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         ...(mapped.details === undefined ? {} : { details: mapped.details }),
       },
     });
+  });
+
+  app.addHook("onSend", async (_request, reply, payload) => {
+    for (const [name, value] of Object.entries(securityHeaders)) void reply.header(name, value);
+    return payload;
   });
 
   app.addHook("onRequest", async (request, reply) => {
@@ -1011,6 +1028,7 @@ function mapError(error: unknown): ApiError {
   if (error instanceof AuthorizationError) return new ApiError(403, "FORBIDDEN", "Permission denied");
   if (error instanceof AuthError) {
     if (error.code === "INVALID_CSRF") return new ApiError(403, "INVALID_CSRF", "CSRF validation failed");
+    if (error.code === "RATE_LIMITED") return new ApiError(429, "RATE_LIMITED", "Too many authentication attempts");
     return new ApiError(401, "UNAUTHENTICATED", "Session is invalid or expired");
   }
   if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError) {

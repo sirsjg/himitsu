@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   AuthError,
+  LoginAttemptLimiter,
   PasswordHasher,
   clearSessionCookieHeaders,
   csrfCookie,
@@ -16,6 +17,23 @@ test("hashes passwords with Argon2id and verifies without exposing the password"
   assert.equal(hash.includes("correct horse"), false);
   assert.equal(await hasher.verify(hash, "correct horse battery staple"), true);
   assert.equal(await hasher.verify(hash, "incorrect password"), false);
+});
+
+test("throttles login failures by account and IP and resets after the window", () => {
+  let now = 1_000;
+  const limiter = new LoginAttemptLimiter({ maxFailures: 3, windowMs: 10_000, now: () => now });
+  assert.equal(limiter.recordFailure(["account:a", "ip:one"]), false);
+  assert.equal(limiter.recordFailure(["account:a", "ip:two"]), false);
+  assert.equal(limiter.recordFailure(["account:a", "ip:three"]), true);
+  assert.equal(limiter.isBlocked(["account:a"]), true);
+  assert.equal(limiter.isBlocked(["account:b", "ip:one"]), false);
+  limiter.clear(["account:a"]);
+  assert.equal(limiter.isBlocked(["account:a"]), false);
+  limiter.recordFailure(["ip:shared"]);
+  limiter.recordFailure(["ip:shared"]);
+  assert.equal(limiter.recordFailure(["ip:shared"]), true);
+  now += 10_000;
+  assert.equal(limiter.isBlocked(["ip:shared"]), false);
 });
 
 test("enforces password length limits", async () => {
