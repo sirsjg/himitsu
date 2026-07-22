@@ -276,6 +276,87 @@ test("bulk-sets atomically and soft-deletes without removing ciphertext history"
   });
 });
 
+test("imports batches with skip, overwrite, and merge selection under one value-free audit event", async () => {
+  await database.withOrg(orgA, memberA, async (transaction) => {
+    const before = await transaction.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM audit_events WHERE action IN ('secret.created', 'secret.updated')",
+    );
+    const skipped = await secrets.importBatch(
+      transaction,
+      memberA,
+      projectA,
+      developmentEnvironmentId,
+      [
+        { key: "DATABASE_URL", value: "postgres://dotenv-skipped" },
+        { key: "IMPORTED_TOKEN", value: "first-import-value" },
+      ],
+      "skip",
+    );
+    assert.deepEqual(skipped.summary, { requested: 2, created: 1, updated: 0, skipped: 1 });
+
+    const overwritten = await secrets.importBatch(
+      transaction,
+      memberA,
+      projectA,
+      developmentEnvironmentId,
+      [
+        { key: "DATABASE_URL", value: "postgres://dotenv-overwrite" },
+        { key: "IMPORTED_TOKEN", value: "second-import-value" },
+      ],
+      "overwrite",
+    );
+    assert.deepEqual(overwritten.summary, { requested: 2, created: 0, updated: 2, skipped: 0 });
+
+    const merged = await secrets.importBatch(
+      transaction,
+      memberA,
+      projectA,
+      developmentEnvironmentId,
+      [
+        { key: "DATABASE_URL", value: "postgres://dotenv-merge" },
+        { key: "IMPORTED_TOKEN", value: "must-remain-second" },
+      ],
+      "merge",
+      ["DATABASE_URL"],
+    );
+    assert.deepEqual(merged.summary, { requested: 2, created: 0, updated: 1, skipped: 1 });
+    const databaseSecret = (await secrets.list(transaction, memberA, projectA, developmentEnvironmentId))
+      .find(({ key }) => key === "DATABASE_URL");
+    const importedSecret = (await secrets.list(transaction, memberA, projectA, developmentEnvironmentId))
+      .find(({ key }) => key === "IMPORTED_TOKEN");
+    assert.ok(databaseSecret);
+    assert.ok(importedSecret);
+    assert.equal((await secrets.get(transaction, memberA, databaseSecret.id)).value, "postgres://dotenv-merge");
+    assert.equal((await secrets.get(transaction, memberA, importedSecret.id)).value, "second-import-value");
+
+    const after = await transaction.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM audit_events WHERE action IN ('secret.created', 'secret.updated')",
+    );
+    assert.equal(after.rows[0]?.count, before.rows[0]?.count);
+    const imports = await transaction.query<{ metadata: Record<string, unknown> }>(
+      "SELECT metadata FROM audit_events WHERE action = 'secret.imported' ORDER BY id",
+    );
+    assert.equal(imports.rowCount, 3);
+    assert.deepEqual(
+      imports.rows.map(({ metadata }) => (metadata.details as { strategy: string }).strategy),
+      ["skip", "overwrite", "merge"],
+    );
+    assert.doesNotMatch(JSON.stringify(imports.rows), /dotenv-(?:skipped|overwrite|merge)|import-value|must-remain/);
+  });
+  await assert.rejects(
+    database.withOrg(orgA, memberA, (transaction) => secrets.importBatch(
+      transaction,
+      memberA,
+      projectA,
+      developmentEnvironmentId,
+      [{ key: "MERGE_ONLY", value: "not-written" }],
+      "merge",
+      [],
+    )),
+    (error: unknown) => error instanceof SecretError && error.code === "INVALID_INPUT",
+  );
+});
+
 test("forced RLS prevents cross-tenant secret access", async () => {
   const otherSecretId = await database.withOrg(orgB, ownerB, async (transaction) => {
     const environment = await transaction.query<{ id: string }>(

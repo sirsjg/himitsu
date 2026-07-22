@@ -24,6 +24,7 @@
     "@himitsu/authz": "0.0.0",
     "@himitsu/crypto": "0.0.0",
     "@himitsu/environments": "0.0.0",
+    "@himitsu/imports": "0.0.0",
     "@himitsu/projects": "0.0.0",
     "@himitsu/secrets": "0.0.0",
     "@himitsu/tenancy": "0.0.0",

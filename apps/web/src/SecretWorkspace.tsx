@@ -46,6 +46,17 @@ export interface BulkParseResult {
   readonly errors: readonly string[];
 }
 
+export interface DotenvPreviewView {
+  readonly entries: readonly { readonly key: string; readonly line: number; readonly operation: "add" | "update" }[];
+  readonly conflicts: readonly { readonly line: number; readonly code: string; readonly message: string; readonly key?: string }[];
+  readonly summary: { readonly adds: number; readonly updates: number; readonly conflicts: number };
+}
+
+export interface SecretImportResultView {
+  readonly secrets: readonly ApiSecretMetadata[];
+  readonly summary: { readonly requested: number; readonly created: number; readonly updated: number; readonly skipped: number };
+}
+
 interface ApiSecretMetadata {
   readonly id: string;
   readonly environmentId: string;
@@ -74,6 +85,8 @@ export interface SecretClient {
   create(projectId: string, environmentId: string, input: BulkSecretInput & { notes?: string | null }): Promise<ApiSecretMetadata>;
   update(secretId: string, expectedVersion: number, input: { value: string; notes?: string | null; changeNote?: string }): Promise<ApiSecretMetadata>;
   bulkSet(projectId: string, environmentId: string, secrets: readonly BulkSecretInput[]): Promise<readonly ApiSecretMetadata[]>;
+  previewDotenv(projectId: string, environmentId: string, content: string): Promise<DotenvPreviewView>;
+  importDotenv(projectId: string, environmentId: string, content: string, strategy: "skip" | "overwrite" | "merge", selectedKeys?: readonly string[]): Promise<SecretImportResultView>;
   versions(secretId: string): Promise<readonly SecretVersionView[]>;
 }
 
@@ -140,6 +153,8 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
     create: (projectId, environmentId, input) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/secrets`, { method: "POST", body: JSON.stringify(input) }),
     update: (secretId, expectedVersion, input) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}`, { method: "PATCH", headers: { "if-match": `\"${expectedVersion}\"` }, body: JSON.stringify(input) }),
     bulkSet: (projectId, environmentId, secrets) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/secrets/bulk`, { method: "POST", body: JSON.stringify({ secrets }) }),
+    previewDotenv: (projectId, environmentId, content) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/dotenv/preview`, { method: "POST", body: JSON.stringify({ content }) }),
+    importDotenv: (projectId, environmentId, content, strategy, selectedKeys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/dotenv`, { method: "POST", body: JSON.stringify({ content, strategy, ...(selectedKeys === undefined ? {} : { selectedKeys }) }) }),
     versions: (secretId) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions?limit=100`),
   };
 }
@@ -284,21 +299,20 @@ export function SecretWorkspace({
     }
   };
 
-  const saveBulk = async (input: readonly BulkSecretInput[]) => {
+  const finishImport = (result: SecretImportResultView) => {
     if (environment === undefined) return;
-    setNotice(null);
-    try {
-      const saved = await client.bulkSet(projectId, environment.id, input);
-      setSecrets((current) => {
-        const other = current.filter(({ environmentId }) => environmentId !== environment.id);
-        const existing = new Map(current.filter(({ environmentId }) => environmentId === environment.id).map((row) => [row.key, row]));
-        return [...other, ...saved.map((row) => metadataToView(row, existing.get(row.key)?.tags))];
+    setSecrets((current) => {
+      const savedByKey = new Map(result.secrets.map((row) => [row.key, row]));
+      const replaced = current.map((row) => {
+        const saved = row.environmentId === environment.id ? savedByKey.get(row.key) : undefined;
+        if (saved === undefined) return row;
+        savedByKey.delete(row.key);
+        return metadataToView(saved, row.tags);
       });
-      setBulkOpen(false);
-      setNotice({ kind: "success", message: `${saved.length} secrets saved in one encrypted batch.` });
-    } catch (error) {
-      setNotice({ kind: "error", message: error instanceof Error ? error.message : "Bulk write failed; no optimistic rows were retained." });
-    }
+      return [...replaced, ...[...savedByKey.values()].map((row) => metadataToView(row))];
+    });
+    setBulkOpen(false);
+    setNotice({ kind: "success", message: `Import complete: ${result.summary.created} added, ${result.summary.updated} updated, ${result.summary.skipped} skipped.` });
   };
 
   return (
@@ -337,7 +351,7 @@ export function SecretWorkspace({
         </div>
         <footer className="secret-panel-foot"><span><i /> Values are encrypted at rest and masked by default</span><span>{environment?.protected ? "Protected environment · elevated writes only" : "Standard write policy"}</span></footer>
       </section>
-      {bulkOpen ? <BulkPaste onCancel={() => setBulkOpen(false)} onSave={saveBulk} /> : null}
+      {bulkOpen && environment ? <DotenvImport projectId={projectId} environmentId={environment.id} client={client} onCancel={() => setBulkOpen(false)} onImported={finishImport} /> : null}
       {historySecret ? <VersionDrawer secret={historySecret} client={client} onClose={() => setHistorySecret(null)} /> : null}
     </div>
   );
@@ -360,10 +374,55 @@ function SecretEditor({ mode, secret, onCancel, onSave }: {
   return <form className="editor-sheet inline-secret-editor" aria-label={`${mode === "add" ? "Add" : "Edit"} secret`} onSubmit={submit}><header><div><span className="kicker">{mode === "add" ? "New encrypted value" : `Version ${secret?.currentVersion ?? ""}`}</span><h2>{mode === "add" ? "Add a secret" : `Update ${secret?.key ?? "secret"}`}</h2></div><button type="button" aria-label="Close editor" onClick={onCancel}>×</button></header><label>Key<input name="key" value={key} disabled={mode === "edit"} onChange={(event) => setKey(event.target.value)} required maxLength={255} autoFocus={mode === "add"} /><small className={conventional || key === "" ? "key-hint" : "key-hint warning"}>{conventional || key === "" ? "Use UPPERCASE_SNAKE_CASE, for example DATABASE_URL." : "This key does not follow UPPERCASE_SNAKE_CASE."}</small></label>{!conventional && key !== "" && mode === "add" ? <label className="check-row"><input type="checkbox" checked={allowNonConformingKey} onChange={(event) => setAllowNonConformingKey(event.target.checked)} /> Keep this non-standard key</label> : null}<label>{mode === "add" ? "Value" : "Replacement value"}<textarea name="value" required rows={5} spellCheck={false} autoComplete="off" placeholder="Secret value (never shown after save)" /></label><label>Note <span>optional</span><input name="notes" defaultValue={secret?.notes ?? ""} maxLength={4000} placeholder="What uses this secret?" /></label>{mode === "edit" ? <label>Change note <span>optional</span><input name="changeNote" maxLength={1000} placeholder="Why is this value changing?" /></label> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit" disabled={key.trim() === "" || (!conventional && !allowNonConformingKey && mode === "add")}>{mode === "add" ? "Encrypt & save" : "Create new version"}</button></footer></form>;
 }
 
-function BulkPaste({ onCancel, onSave }: { onCancel: () => void; onSave: (input: readonly BulkSecretInput[]) => Promise<void> }): ReactNode {
+function DotenvImport({ projectId, environmentId, client, onCancel, onImported }: {
+  projectId: string;
+  environmentId: string;
+  client: SecretClient;
+  onCancel: () => void;
+  onImported: (result: SecretImportResultView) => void;
+}): ReactNode {
   const [source, setSource] = useState("");
-  const parsed = useMemo(() => parseBulkSecrets(source), [source]);
-  return <div className="sheet-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="editor-sheet bulk-sheet" role="dialog" aria-modal="true" aria-label="Bulk paste secrets"><header><div><span className="kicker">Atomic batch</span><h2>Bulk paste</h2></div><button type="button" aria-label="Close bulk paste" onClick={onCancel}>×</button></header><label>Dotenv-style values<textarea value={source} onChange={(event) => setSource(event.target.value)} rows={12} spellCheck={false} placeholder={'DATABASE_URL="postgres://…"\nREDIS_URL=redis://…'} autoFocus /></label><div className="bulk-preview"><strong>{parsed.secrets.length} ready</strong><span>{parsed.secrets.filter(({ allowNonConformingKey }) => allowNonConformingKey).length} key overrides</span>{parsed.errors.map((error) => <em key={error}>{error}</em>)}</div><footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" disabled={parsed.secrets.length === 0 || parsed.errors.length > 0} onClick={() => void onSave(parsed.secrets)}>Review & save {parsed.secrets.length}</button></footer></section></div>;
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [preview, setPreview] = useState<DotenvPreviewView | null>(null);
+  const [strategy, setStrategy] = useState<"skip" | "overwrite" | "merge">("skip");
+  const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const loadFile = async (file: File | undefined) => {
+    if (file === undefined) return;
+    if (file.size > 1_048_576) { setError("Dotenv files must be 1 MiB or smaller."); return; }
+    setSource(await file.text());
+    setFileName(file.name);
+    setPreview(null);
+    setError(null);
+  };
+  const review = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await client.previewDotenv(projectId, environmentId, source);
+      setPreview(result);
+      setSelectedKeys(new Set(result.entries.map(({ key }) => key)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Preview could not be generated.");
+    } finally { setBusy(false); }
+  };
+  const commit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await client.importDotenv(projectId, environmentId, source, strategy, strategy === "merge" ? [...selectedKeys] : undefined);
+      onImported(result);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Import could not be committed.");
+    } finally { setBusy(false); }
+  };
+  const toggle = (key: string) => setSelectedKeys((current) => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  return <div className="sheet-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="editor-sheet bulk-sheet" role="dialog" aria-modal="true" aria-label="Import dotenv secrets"><header><div><span className="kicker">Value-free preview</span><h2>Import .env</h2></div><button type="button" aria-label="Close dotenv import" onClick={onCancel}>×</button></header>{preview === null ? <><label>Paste dotenv content<textarea value={source} onChange={(event) => { setSource(event.target.value); setPreview(null); }} rows={12} spellCheck={false} placeholder={'DATABASE_URL="postgres://…"\nREDIS_URL=redis://…'} autoFocus /></label><label className="file-picker"><span>or upload a .env file</span><input type="file" accept=".env,text/plain" onChange={(event) => void loadFile(event.target.files?.[0])} /><strong>{fileName ?? "Choose file"}</strong></label>{error ? <p className="import-error" role="alert">{error}</p> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" disabled={source.trim() === "" || busy} onClick={() => void review()}>{busy ? "Inspecting…" : "Preview import"}</button></footer></> : <><div className="import-summary"><strong>{preview.summary.adds}<span>adds</span></strong><strong>{preview.summary.updates}<span>updates</span></strong><strong className={preview.summary.conflicts > 0 ? "danger" : ""}>{preview.summary.conflicts}<span>conflicts</span></strong></div><div className="import-strategies" role="radiogroup" aria-label="Conflict strategy">{(["skip", "overwrite", "merge"] as const).map((option) => <label key={option}><input type="radio" name="strategy" value={option} checked={strategy === option} onChange={() => setStrategy(option)} /><span><strong>{option === "skip" ? "Skip existing" : option === "overwrite" ? "Overwrite all" : "Select keys"}</strong><small>{option === "skip" ? "Only create new keys" : option === "overwrite" ? "Replace every existing key" : "Choose each add or update"}</small></span></label>)}</div><div className="import-preview-list">{preview.entries.map((entry) => <label key={`${entry.line}-${entry.key}`}><input type="checkbox" checked={strategy !== "merge" || selectedKeys.has(entry.key)} disabled={strategy !== "merge"} onChange={() => toggle(entry.key)} /><code>{entry.key}</code><span className={entry.operation}>{entry.operation}</span><small>line {entry.line}</small></label>)}{preview.conflicts.map((conflict) => <p key={`${conflict.line}-${conflict.code}`}><strong>Conflict · line {conflict.line}</strong>{conflict.message}</p>)}</div>{error ? <p className="import-error" role="alert">{error}</p> : null}<footer><button className="secondary-button" type="button" onClick={() => { setPreview(null); setError(null); }}>Back</button><button className="primary-button" type="button" disabled={busy || preview.conflicts.length > 0 || (strategy === "merge" && selectedKeys.size === 0)} onClick={() => void commit()}>{busy ? "Importing…" : `Commit ${strategy === "merge" ? selectedKeys.size : preview.entries.length} keys`}</button></footer></>}</section></div>;
 }
 
 function VersionDrawer({ secret, client, onClose }: { secret: SecretView; client: SecretClient; onClose: () => void }): ReactNode {

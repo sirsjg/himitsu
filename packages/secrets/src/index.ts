@@ -62,6 +62,18 @@ export interface SetSecretInput {
   readonly allowNonConformingKey?: boolean;
 }
 
+export type SecretImportStrategy = "skip" | "overwrite" | "merge";
+
+export interface SecretImportResult {
+  readonly secrets: readonly SecretMetadata[];
+  readonly summary: {
+    readonly requested: number;
+    readonly created: number;
+    readonly updated: number;
+    readonly skipped: number;
+  };
+}
+
 interface SecretRow {
   id: string;
   org_id: string;
@@ -338,6 +350,100 @@ export class SecretService {
     return results;
   }
 
+  async importBatch(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    projectId: string,
+    environmentId: string,
+    inputs: readonly SetSecretInput[],
+    strategy: SecretImportStrategy,
+    selectedKeys: readonly string[] = [],
+  ): Promise<SecretImportResult> {
+    if (inputs.length < 1 || inputs.length > MAX_BULK_ITEMS) {
+      throw new SecretError("INVALID_INPUT", `Imports require between 1 and ${MAX_BULK_ITEMS} secrets`);
+    }
+    if (!(["skip", "overwrite", "merge"] as const).includes(strategy)) {
+      throw new SecretError("INVALID_INPUT", "Import conflict strategy is invalid");
+    }
+    const normalized = inputs.map((input) => ({
+      input,
+      key: validateSecretKey(input.key, input.allowNonConformingKey ?? false),
+    }));
+    const sourceKeys = new Set(normalized.map(({ key }) => key));
+    if (sourceKeys.size !== normalized.length) {
+      throw new SecretError("INVALID_INPUT", "Imports cannot contain duplicate keys");
+    }
+    const selected = new Set(selectedKeys);
+    if (strategy === "merge" && (selected.size === 0 || [...selected].some((key) => !sourceKeys.has(key)))) {
+      throw new SecretError("INVALID_INPUT", "Merge imports require selected keys from the preview");
+    }
+    const environment = await this.#environment(transaction, projectId, environmentId);
+    requirePermission(
+      await this.#resolver.resolve(transaction, actorUserId, projectId, environment.protected),
+      "secret.write",
+    );
+    const existingRows = await transaction.query<SecretRow>(
+      `${secretSelect}
+       WHERE s.project_id = $1 AND s.environment_id = $2 AND s.key = ANY($3::text[])
+         AND s.deleted_at IS NULL
+       ORDER BY s.key
+       FOR UPDATE OF s`,
+      [projectId, environmentId, [...sourceKeys]],
+    );
+    const existing = new Map(existingRows.rows.map((row) => [row.key, row]));
+    const results: SecretMetadata[] = [];
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    for (const { input, key } of normalized) {
+      const row = existing.get(key);
+      const included = strategy === "overwrite"
+        || (strategy === "skip" && row === undefined)
+        || (strategy === "merge" && selected.has(key));
+      if (!included) { skipped += 1; continue; }
+      if (row === undefined) {
+        results.push(await this.#create(
+          transaction,
+          actorUserId,
+          projectId,
+          environmentId,
+          { ...input, key, changeNote: input.changeNote ?? "dotenv import" },
+          true,
+          false,
+        ));
+        created += 1;
+      } else {
+        results.push(await this.#writeVersion(
+          transaction,
+          actorUserId,
+          row,
+          { ...input, changeNote: input.changeNote ?? "dotenv import" },
+          "secret.updated",
+          false,
+        ));
+        updated += 1;
+      }
+    }
+    await this.#audit.recordInTransaction(transaction, {
+      orgId: transaction.orgId,
+      actor: { type: "user", id: actorUserId },
+      action: "secret.imported",
+      resource: { type: "environment", id: environmentId },
+      projectId,
+      environmentId,
+      details: {
+        format: "dotenv",
+        strategy,
+        requested: normalized.length,
+        created,
+        updated,
+        skipped,
+        keys: results.map(({ key }) => key),
+      },
+    });
+    return { secrets: results, summary: { requested: normalized.length, created, updated, skipped } };
+  }
+
   async delete(
     transaction: TenantTransaction,
     actorUserId: string,
@@ -372,6 +478,7 @@ export class SecretService {
     environmentId: string,
     input: SetSecretInput,
     authorized = false,
+    recordAudit = true,
   ): Promise<SecretMetadata> {
     const environment = await this.#environment(transaction, projectId, environmentId);
     if (!authorized) {
@@ -404,6 +511,7 @@ export class SecretService {
         recoverable,
         { value: input.value, notes, changeNote },
         "secret.created",
+        recordAudit,
       );
     }
     const secretId = randomUUID();
@@ -424,6 +532,7 @@ export class SecretService {
         row,
         { value: input.value, notes, changeNote },
         "secret.created",
+        recordAudit,
       );
     } catch (error) {
       if ((error as { code?: string }).code === "23505") {
@@ -439,6 +548,7 @@ export class SecretService {
     before: SecretRow,
     input: { value: string; notes?: string | null; changeNote?: string | null },
     action: "secret.created" | "secret.updated",
+    recordAudit = true,
   ): Promise<SecretMetadata> {
     const plaintext = validateSecretValue(input.value);
     const notes = input.notes === undefined ? before.notes : validateNotes(input.notes);
@@ -481,18 +591,20 @@ export class SecretService {
       );
       const row = updated.rows[0];
       if (row === undefined) throw new SecretError("NOT_FOUND", "Secret not found");
-      await this.#audit.recordInTransaction(transaction, {
-        orgId: transaction.orgId,
-        actor: { type: "user", id: actorUserId },
-        action,
-        resource: { type: "secret", id: row.id },
-        projectId: row.project_id,
-        environmentId: row.environment_id,
-        ...(action === "secret.updated"
-          ? { before: { key: before.key, version: before.current_version, notesPresent: before.notes !== null } }
-          : {}),
-        after: { key: row.key, version: row.current_version, notesPresent: row.notes !== null },
-      });
+      if (recordAudit) {
+        await this.#audit.recordInTransaction(transaction, {
+          orgId: transaction.orgId,
+          actor: { type: "user", id: actorUserId },
+          action,
+          resource: { type: "secret", id: row.id },
+          projectId: row.project_id,
+          environmentId: row.environment_id,
+          ...(action === "secret.updated"
+            ? { before: { key: before.key, version: before.current_version, notesPresent: before.notes !== null } }
+            : {}),
+          after: { key: row.key, version: row.current_version, notesPresent: row.notes !== null },
+        });
+      }
       return metadataFromRow(row);
     } finally {
       plaintext.fill(0);

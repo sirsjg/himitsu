@@ -253,6 +253,34 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .bulk-preview { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--surface-2); font-family: "DM Mono", monospace; font-size: 8px; }
 .bulk-preview strong { color: var(--accent); }
 .bulk-preview em { width: 100%; color: var(--danger); font-style: normal; }
+.file-picker { position: relative; min-height: 55px; display: flex !important; grid-template-columns: none !important; align-items: center; justify-content: space-between; padding: 11px 13px; border: 1px dashed var(--line-strong); border-radius: 6px; cursor: pointer; }
+.file-picker:hover { border-color: var(--accent); }
+.file-picker input { position: absolute; width: 1px !important; height: 1px !important; opacity: 0; }
+.file-picker strong { color: var(--accent); font-family: "DM Mono", monospace; font-size: 9px; font-weight: 500; }
+.import-error { margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--line)); border-radius: 5px; color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, transparent); font-size: 9px; }
+.import-summary { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.import-summary strong { display: grid; gap: 3px; padding: 14px; border-right: 1px solid var(--line); font-family: "DM Mono", monospace; font-size: 18px; font-weight: 500; }
+.import-summary strong:last-child { border-right: 0; }
+.import-summary strong span { color: var(--faint); font-size: 7px; font-weight: 400; text-transform: uppercase; letter-spacing: .1em; }
+.import-summary strong.danger { color: var(--danger); }
+.import-strategies { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+.import-strategies label { display: flex; align-items: start; gap: 8px; padding: 11px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); cursor: pointer; }
+.import-strategies label:has(input:checked) { color: var(--ink); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.import-strategies input { width: auto !important; height: auto !important; margin: 2px 0 0; accent-color: var(--accent); }
+.import-strategies span { display: grid; gap: 3px; }
+.import-strategies strong { font-size: 9px; }
+.import-strategies small { color: var(--faint); font-size: 7px; line-height: 1.4; }
+.import-preview-list { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; }
+.import-preview-list label { min-height: 39px; display: grid; grid-template-columns: 18px 1fr auto 50px; align-items: center; gap: 9px; padding: 7px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.import-preview-list label:last-of-type { border-bottom: 0; }
+.import-preview-list input { width: auto !important; height: auto !important; accent-color: var(--accent); }
+.import-preview-list code { overflow: hidden; color: var(--ink); font-family: "DM Mono", monospace; font-size: 9px; text-overflow: ellipsis; }
+.import-preview-list label > span { padding: 3px 6px; border-radius: 999px; font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; }
+.import-preview-list .add { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.import-preview-list .update { color: #f0bf68; background: rgb(240 191 104 / 9%); }
+.import-preview-list label > small { color: var(--faint); font-family: "DM Mono", monospace; font-size: 7px; }
+.import-preview-list > p { display: grid; gap: 3px; margin: 0; padding: 9px 12px; border-top: 1px solid color-mix(in srgb, var(--danger) 20%, var(--line)); color: var(--danger); background: color-mix(in srgb, var(--danger) 6%, transparent); font-size: 8px; }
+.import-preview-list > p strong { font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; }
 .drawer-backdrop { justify-items: end; }
 .version-drawer { width: min(460px, 48vw); height: 100vh; display: grid; grid-template-rows: auto 1fr auto; padding: 27px; border-left: 1px solid var(--line-strong); background: var(--surface); box-shadow: var(--shadow); }
 .version-drawer header p { max-width: 320px; margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }

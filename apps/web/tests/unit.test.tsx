@@ -153,6 +153,21 @@ test("secret client targets v1 routes, sends optimistic version preconditions, a
     assert.equal(error.message, "Version is stale");
     return true;
   });
+
+  const importCalls: Array<{ input: string; body: unknown }> = [];
+  const imports = createSecretClient(async (input, init) => {
+    importCalls.push({ input, body: JSON.parse(String(init?.body)) });
+    const data = input.endsWith("/preview")
+      ? { entries: [{ key: "A", line: 1, operation: "add" }], conflicts: [], summary: { adds: 1, updates: 0, conflicts: 0 } }
+      : { secrets: [], summary: { requested: 1, created: 0, updated: 0, skipped: 1 } };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  await imports.previewDotenv("project/id", "environment/id", "A=one");
+  await imports.importDotenv("project/id", "environment/id", "A=one", "merge", ["A"]);
+  assert.deepEqual(importCalls, [
+    { input: "/api/v1/projects/project%2Fid/environments/environment%2Fid/imports/dotenv/preview", body: { content: "A=one" } },
+    { input: "/api/v1/projects/project%2Fid/environments/environment%2Fid/imports/dotenv", body: { content: "A=one", strategy: "merge", selectedKeys: ["A"] } },
+  ]);
 });
 
 test("project detail renders environment browsing and masked secret editing controls", () => {

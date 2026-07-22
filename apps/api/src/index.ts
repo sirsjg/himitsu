@@ -9,6 +9,7 @@ import {
   type Permission,
 } from "@himitsu/authz";
 import { EnvironmentError, type EnvironmentService } from "@himitsu/environments";
+import { buildDotenvPreview, parseDotenv } from "@himitsu/imports";
 import { ProjectError, type ProjectService } from "@himitsu/projects";
 import { SecretError, type SecretService } from "@himitsu/secrets";
 import { TenancyError, type TenantDatabase, type TenantTransaction } from "@himitsu/tenancy";
@@ -164,6 +165,67 @@ const versionSchema = {
     createdAt: dateTime, current: { type: "boolean" },
   },
 } as const;
+const dotenvIssueSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["line", "code", "message"],
+  properties: {
+    line: { type: "integer", minimum: 1 },
+    code: { type: "string" },
+    message: { type: "string" },
+    key: { type: "string" },
+  },
+} as const;
+const dotenvPreviewSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["entries", "conflicts", "summary"],
+  properties: {
+    entries: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "line", "operation"],
+        properties: {
+          key: { type: "string" },
+          line: { type: "integer" },
+          operation: { type: "string", enum: ["add", "update"] },
+        },
+      },
+    },
+    conflicts: { type: "array", items: dotenvIssueSchema },
+    summary: {
+      type: "object",
+      additionalProperties: false,
+      required: ["adds", "updates", "conflicts"],
+      properties: {
+        adds: { type: "integer" },
+        updates: { type: "integer" },
+        conflicts: { type: "integer" },
+      },
+    },
+  },
+} as const;
+const importResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["secrets", "summary"],
+  properties: {
+    secrets: { type: "array", items: secretMetadataSchema },
+    summary: {
+      type: "object",
+      additionalProperties: false,
+      required: ["requested", "created", "updated", "skipped"],
+      properties: {
+        requested: { type: "integer" },
+        created: { type: "integer" },
+        updated: { type: "integer" },
+        skipped: { type: "integer" },
+      },
+    },
+  },
+} as const;
 const tagSchema = {
   type: "object", additionalProperties: false,
   required: ["id", "name", "color", "createdAt", "updatedAt"],
@@ -206,6 +268,8 @@ export const apiRoutePermissions = Object.freeze({
   updateSecret: "secret.write",
   deleteSecret: "secret.delete",
   listSecretVersions: "secret.read",
+  previewDotenvImport: "secret.write",
+  commitDotenvImport: "secret.write",
   listTags: "org.settings.read",
   createTag: "org.settings.update",
   updateTag: "org.settings.update",
@@ -423,6 +487,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         { name: "environments" },
         { name: "secrets" },
         { name: "versions" },
+        { name: "imports" },
         { name: "tags" },
         { name: "api-keys" },
       ],
@@ -715,6 +780,56 @@ function registerSecretRoutes(
       : metadata.filter(({ key }) => requested.includes(key));
     const values = await Promise.all(selected.map(({ id }) => dependencies.secrets.get(transaction, context.userId, id)));
     return { data: Object.fromEntries(values.map(({ key, value }) => [key, value])), meta: { count: values.length } };
+  }));
+  const dotenvBody = {
+    type: "object", additionalProperties: false, required: ["content"],
+    properties: { content: { type: "string", minLength: 1, maxLength: 1_048_576 } },
+  } as const;
+  app.post("/api/v1/projects/:projectId/environments/:environmentId/imports/dotenv/preview", {
+    schema: {
+      operationId: "previewDotenvImport", tags: ["imports"], params: scopeParams,
+      body: dotenvBody, response: apiResponses(dotenvPreviewSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const projectId = params(request).projectId ?? "";
+    const environmentId = params(request).environmentId ?? "";
+    const parsed = parseDotenv((request.body as { content: string }).content);
+    const existing = await dependencies.secrets.list(transaction, context.userId, projectId, environmentId);
+    return { data: buildDotenvPreview(parsed, new Set(existing.map(({ key }) => key))) };
+  }));
+  app.post("/api/v1/projects/:projectId/environments/:environmentId/imports/dotenv", {
+    schema: {
+      operationId: "commitDotenvImport", tags: ["imports"], params: scopeParams,
+      body: {
+        type: "object", additionalProperties: false, required: ["content", "strategy"],
+        properties: {
+          ...dotenvBody.properties,
+          strategy: { type: "string", enum: ["skip", "overwrite", "merge"] },
+          selectedKeys: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string" } },
+        },
+      },
+      response: apiResponses(importResultSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const body = request.body as { content: string; strategy: "skip" | "overwrite" | "merge"; selectedKeys?: string[] };
+    const parsed = parseDotenv(body.content);
+    if (parsed.issues.length > 0) {
+      throw new ApiError(400, "DOTENV_PARSE_ERROR", "Resolve dotenv conflicts before importing", { conflicts: parsed.issues });
+    }
+    const result = await dependencies.secrets.importBatch(
+      transaction,
+      context.userId,
+      params(request).projectId ?? "",
+      params(request).environmentId ?? "",
+      parsed.entries.map(({ key, value }) => ({
+        key,
+        value,
+        ...(!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/.test(key) ? { allowNonConformingKey: true } : {}),
+      })),
+      body.strategy,
+      body.selectedKeys ?? [],
+    );
+    return { data: result };
   }));
   app.get("/api/v1/secrets/:secretId", {
     schema: { operationId: "getSecret", tags: ["secrets"], params: secretParams, response: apiResponses(secretValueSchema) },

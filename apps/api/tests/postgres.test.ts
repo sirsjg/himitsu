@@ -382,6 +382,75 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   assert.equal(missing.json().error.code, "NOT_FOUND");
 });
 
+test("previews and commits dotenv imports with explicit conflict strategies", async () => {
+  const conflictedContent = [
+    "CACHE_URL=redis://dotenv-update",
+    "NEW_FROM_DOTENV=first-import-value",
+    "BROKEN LINE",
+  ].join("\n");
+  const preview = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/dotenv/preview`,
+    headers: headers(orgA, memberA),
+    payload: { content: conflictedContent },
+  });
+  assert.equal(preview.statusCode, 200, preview.body);
+  assert.deepEqual(preview.json().data.summary, { adds: 1, updates: 1, conflicts: 1 });
+  assert.deepEqual(preview.json().data.entries.map(({ key, operation }: { key: string; operation: string }) => ({ key, operation })), [
+    { key: "CACHE_URL", operation: "update" },
+    { key: "NEW_FROM_DOTENV", operation: "add" },
+  ]);
+  assert.equal(preview.body.includes("first-import-value"), false);
+
+  const rejected = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/dotenv`,
+    headers: headers(orgA, memberA),
+    payload: { content: conflictedContent, strategy: "overwrite" },
+  });
+  assert.equal(rejected.statusCode, 400, rejected.body);
+  assert.equal(rejected.json().error.code, "DOTENV_PARSE_ERROR");
+
+  const content = "CACHE_URL=redis://dotenv-update\nNEW_FROM_DOTENV=first-import-value";
+  const skipped = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/dotenv`,
+    headers: headers(orgA, memberA),
+    payload: { content, strategy: "skip" },
+  });
+  assert.equal(skipped.statusCode, 200, skipped.body);
+  assert.deepEqual(skipped.json().data.summary, { requested: 2, created: 1, updated: 0, skipped: 1 });
+
+  const merged = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/dotenv`,
+    headers: headers(orgA, memberA),
+    payload: { content, strategy: "merge", selectedKeys: ["CACHE_URL"] },
+  });
+  assert.equal(merged.statusCode, 200, merged.body);
+  assert.deepEqual(merged.json().data.summary, { requested: 2, created: 0, updated: 1, skipped: 1 });
+
+  const values = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/bulk-get`,
+    headers: headers(orgA, memberA),
+    payload: { keys: ["CACHE_URL", "NEW_FROM_DOTENV"] },
+  });
+  assert.equal(values.statusCode, 200, values.body);
+  assert.deepEqual(values.json().data, {
+    CACHE_URL: "redis://dotenv-update",
+    NEW_FROM_DOTENV: "first-import-value",
+  });
+
+  const protectedPreview = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/imports/dotenv/preview`,
+    headers: headers(orgA, memberA),
+    payload: { content: "PROTECTED_IMPORT=denied" },
+  });
+  assert.equal(protectedPreview.statusCode, 403, protectedPreview.body);
+});
+
 test("maps RBAC and tenant isolation failures to non-leaking HTTP errors", async () => {
   const protectedWrite = await app.inject({
     method: "POST",
