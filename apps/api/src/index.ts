@@ -606,6 +606,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         version: "1.0.0",
       },
       tags: [
+        { name: "auth" },
         { name: "projects" },
         { name: "environments" },
         { name: "secrets" },
@@ -639,6 +640,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
   app.addHook("onRequest", async (request, reply) => {
     if (routePath(request) === "/api/v1/openapi.json") return;
     applyRateLimitHeaders(reply, rateLimiter.consume("ip", request.ip));
+    if (routePath(request) === "/api/v1/cli/login") return;
     const context = await authenticateRequest(dependencies, request);
     if (context.apiKey !== null) {
       applyRateLimitHeaders(reply, rateLimiter.consume("api_key", context.apiKey.apiKeyId));
@@ -666,6 +668,42 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
       response: { 200: { type: "object", additionalProperties: true } },
     },
   }, async () => app.swagger());
+
+  app.post("/api/v1/cli/login", {
+    schema: {
+      tags: ["auth"],
+      body: { type: "object", additionalProperties: false, required: ["email", "password"], properties: {
+        email: { type: "string", format: "email", maxLength: 320 }, password: { type: "string", minLength: 1, maxLength: 1024 }, orgId: uuid,
+      } },
+      response: apiResponses({
+        type: "object", additionalProperties: false,
+        required: ["sessionToken", "csrfToken", "expiresAt", "user", "organizations", "activeOrgId"],
+        properties: {
+          sessionToken: { type: "string" }, csrfToken: { type: "string" }, expiresAt: dateTime,
+          user: { type: "object", additionalProperties: false, required: ["id", "email"], properties: { id: uuid, email: { type: "string" } } },
+          organizations: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "name", "slug", "role", "active"], properties: {
+            id: uuid, name: { type: "string" }, slug: { type: "string" }, role: { type: "string", enum: ["owner", "admin", "member", "read_only"] }, active: { type: "boolean" },
+          } } },
+          activeOrgId: nullableUuid,
+        },
+      }),
+    },
+  }, async (request) => {
+    const input = request.body as { email: string; password: string; orgId?: string };
+    const credentials = await dependencies.auth.login(input.email, input.password, clientDetails(request));
+    const session = await dependencies.auth.authenticate(credentials.sessionToken);
+    const organizations = await dependencies.database.listOrganizationOptions(credentials.user.id, null);
+    const selectedOrgId = input.orgId ?? (organizations.length === 1 ? organizations[0]?.id : undefined);
+    if (selectedOrgId !== undefined) {
+      if (!organizations.some(({ id }) => id === selectedOrgId)) throw new ApiError(403, "MEMBERSHIP_REQUIRED", "Active organization membership is required");
+      await dependencies.database.switchActiveOrganization(session.sessionId, credentials.user.id, selectedOrgId);
+    }
+    return { data: {
+      ...credentials,
+      organizations: organizations.map((organization) => ({ ...organization, active: organization.id === selectedOrgId })),
+      activeOrgId: selectedOrgId ?? null,
+    } };
+  });
 
   app.get("/api/v1/projects", {
     schema: { operationId: "listProjects", tags: ["projects"], querystring: pageQuery, response: apiResponses(listSchema(projectSchema), true) },

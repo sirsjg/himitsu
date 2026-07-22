@@ -143,6 +143,7 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
   }
   for (const path of [
     "/api/v1/projects",
+    "/api/v1/cli/login",
     "/api/v1/projects/{projectId}/environments",
     "/api/v1/projects/{projectId}/consistency",
     "/api/v1/audit-events",
@@ -187,6 +188,26 @@ test("returns stable validation and authentication error envelopes", async () =>
   assert.equal(invalid.statusCode, 400);
   assert.equal(invalid.json().error.code, "INVALID_REQUEST");
   assert.ok(invalid.json().error.requestId);
+});
+
+test("creates a CLI session and selects its sole organization", async () => {
+  const email = `cli-${randomUUID()}@example.com`;
+  const registered = await auth.signup(email, "correct horse battery staple");
+  await adminPool.query("UPDATE users SET email_verified_at = now() WHERE id = $1", [registered.userId]);
+  await adminPool.query("INSERT INTO memberships (org_id, user_id, role) VALUES ($1, $2, 'admin')", [orgA, registered.userId]);
+  const login = await app.inject({
+    method: "POST", url: "/api/v1/cli/login", payload: { email, password: "correct horse battery staple" },
+  });
+  assert.equal(login.statusCode, 200, login.body);
+  assert.equal(login.json().data.activeOrgId, orgA);
+  assert.equal(login.json().data.organizations.length, 1);
+  assert.ok(login.json().data.sessionToken);
+  assert.ok(login.json().data.csrfToken);
+  const authenticated = await app.inject({
+    method: "GET", url: "/api/v1/projects",
+    headers: { cookie: `${sessionCookie.name}=${encodeURIComponent(login.json().data.sessionToken)}` },
+  });
+  assert.equal(authenticated.statusCode, 200, authenticated.body);
 });
 
 test("enforces session CSRF and audits attributable failed authentication", async () => {
