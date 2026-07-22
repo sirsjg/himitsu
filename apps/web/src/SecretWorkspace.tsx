@@ -35,6 +35,15 @@ export interface SecretVersionView {
   readonly current: boolean;
 }
 
+export interface SecretVersionComparisonView {
+  readonly fromVersion: number;
+  readonly toVersion: number;
+  readonly changed: boolean;
+  readonly masked: boolean;
+  readonly fromValue?: string;
+  readonly toValue?: string;
+}
+
 export interface BulkSecretInput {
   readonly key: string;
   readonly value: string;
@@ -96,6 +105,8 @@ export interface SecretClient {
   previewJson(projectId: string, environmentId: string, content: string, delimiter: string): Promise<JsonImportPreviewView>;
   importJson(projectId: string, environmentId: string, content: string, delimiter: string, strategy: "skip" | "overwrite" | "merge", selectedKeys?: readonly string[]): Promise<SecretImportResultView>;
   versions(secretId: string): Promise<readonly SecretVersionView[]>;
+  compareVersions(secretId: string, fromVersion: number, toVersion: number, reveal?: boolean): Promise<SecretVersionComparisonView>;
+  rollbackVersion(secretId: string, targetVersion: number, expectedVersion: number): Promise<ApiSecretMetadata>;
 }
 
 export function isConventionalSecretKey(key: string): boolean {
@@ -166,6 +177,8 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
     previewJson: (projectId, environmentId, content, delimiter) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/json/preview`, { method: "POST", body: JSON.stringify({ content, delimiter }) }),
     importJson: (projectId, environmentId, content, delimiter, strategy, selectedKeys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/json`, { method: "POST", body: JSON.stringify({ content, delimiter, strategy, ...(selectedKeys === undefined ? {} : { selectedKeys }) }) }),
     versions: (secretId) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions?limit=100`),
+    compareVersions: (secretId, fromVersion, toVersion, reveal = false) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/compare?from=${fromVersion}&to=${toVersion}${reveal ? "&reveal=true" : ""}`),
+    rollbackVersion: (secretId, targetVersion, expectedVersion) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/${targetVersion}/rollback`, { method: "POST", body: JSON.stringify({ expectedVersion, changeNote: `Rollback to version ${targetVersion}` }) }),
   };
 }
 
@@ -325,6 +338,14 @@ export function SecretWorkspace({
     setNotice({ kind: "success", message: `Import complete: ${result.summary.created} added, ${result.summary.updated} updated, ${result.summary.skipped} skipped.` });
   };
 
+  const finishRollback = (saved: ApiSecretMetadata) => {
+    const previous = secrets.find(({ id }) => id === saved.id);
+    const view = metadataToView(saved, previous?.tags ?? []);
+    setSecrets((current) => current.map((row) => row.id === saved.id ? view : row));
+    setHistorySecret(view);
+    setNotice({ kind: "success", message: `${saved.key} rolled back as new version ${saved.currentVersion}.` });
+  };
+
   return (
     <div className="secret-workspace page-stack">
       <header className="project-heading">
@@ -362,7 +383,7 @@ export function SecretWorkspace({
         <footer className="secret-panel-foot"><span><i /> Values are encrypted at rest and masked by default</span><span>{environment?.protected ? "Protected environment · elevated writes only" : "Standard write policy"}</span></footer>
       </section>
       {bulkOpen && environment ? <DotenvImport projectId={projectId} environmentId={environment.id} client={client} onCancel={() => setBulkOpen(false)} onImported={finishImport} /> : null}
-      {historySecret ? <VersionDrawer secret={historySecret} client={client} onClose={() => setHistorySecret(null)} /> : null}
+      {historySecret ? <VersionDrawer secret={historySecret} client={client} onClose={() => setHistorySecret(null)} onRolledBack={finishRollback} /> : null}
     </div>
   );
 }
@@ -490,13 +511,62 @@ function DotenvImport({ projectId, environmentId, client, onCancel, onImported }
   );
 }
 
-function VersionDrawer({ secret, client, onClose }: { secret: SecretView; client: SecretClient; onClose: () => void }): ReactNode {
+function VersionDrawer({ secret, client, onClose, onRolledBack }: {
+  secret: SecretView;
+  client: SecretClient;
+  onClose: () => void;
+  onRolledBack: (saved: ApiSecretMetadata) => void;
+}): ReactNode {
   const [versions, setVersions] = useState<readonly SecretVersionView[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [comparison, setComparison] = useState<SecretVersionComparisonView | null>(null);
+  const [busy, setBusy] = useState(false);
+  const loadVersions = async () => {
+    try { setVersions(await client.versions(secret.id)); setError(null); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "History could not be loaded."); }
+  };
   useEffect(() => {
     let active = true;
     void client.versions(secret.id).then((result) => { if (active) setVersions(result); }).catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "History could not be loaded."); });
     return () => { active = false; };
   }, [client, secret.id]);
-  return <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="version-drawer" role="dialog" aria-modal="true" aria-label={`${secret.key} version history`}><header><div><span className="kicker">Immutable history</span><h2>{secret.key}</h2><p>Version metadata is visible; historical plaintext remains sealed.</p></div><button type="button" aria-label="Close version history" onClick={onClose}>×</button></header><div className="version-timeline">{error ? <p className="drawer-error">{error}</p> : null}{versions.length === 0 && error === null ? <p className="drawer-loading">Loading encrypted history…</p> : versions.map((version) => <article key={version.version} className={version.current ? "current" : ""}><i /><div><strong>Version {version.version}{version.current ? <span>current</span> : null}</strong><p>{version.changeNote ?? "No change note"}</p><small>{new Date(version.createdAt).toLocaleString()} · key v{version.encryptionKeyVersion}</small></div></article>)}</div><footer><span>{secret.currentVersion} immutable version{secret.currentVersion === 1 ? "" : "s"}</span><button className="secondary-button" type="button" onClick={onClose}>Done</button></footer></aside></div>;
+  useEffect(() => {
+    if (comparison?.masked !== false) return;
+    const timer = setTimeout(() => setComparison({
+      fromVersion: comparison.fromVersion,
+      toVersion: comparison.toVersion,
+      changed: comparison.changed,
+      masked: true,
+    }), 15_000);
+    return () => clearTimeout(timer);
+  }, [comparison]);
+  const compare = async (version: number, reveal: boolean) => {
+    setBusy(true);
+    try { setComparison(await client.compareVersions(secret.id, version, secret.currentVersion, reveal)); setError(null); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Versions could not be compared."); }
+    finally { setBusy(false); }
+  };
+  const rollback = async (version: number) => {
+    setBusy(true);
+    try {
+      const saved = await client.rollbackVersion(secret.id, version, secret.currentVersion);
+      onRolledBack(saved);
+      setComparison(null);
+      await loadVersions();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Rollback could not be completed."); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <aside className="version-drawer" role="dialog" aria-modal="true" aria-label={`${secret.key} version history`}>
+        <header><div><span className="kicker">Immutable history</span><h2>{secret.key}</h2><p>Compare safely while masked, or reveal values briefly. Rollback always creates a new version.</p></div><button type="button" aria-label="Close version history" onClick={onClose}>×</button></header>
+        <div className="version-timeline">
+          {error ? <p className="drawer-error" role="alert">{error}</p> : null}
+          {comparison ? <section className="version-comparison" aria-label="Version comparison"><header><strong>v{comparison.fromVersion} → v{comparison.toVersion}</strong><span>{comparison.changed ? "Values differ" : "Values match"}</span></header><div><code>{comparison.masked ? "••••••••••••" : comparison.fromValue}</code><b>→</b><code>{comparison.masked ? "••••••••••••" : comparison.toValue}</code></div><button type="button" disabled={busy} onClick={() => comparison.masked ? void compare(comparison.fromVersion, true) : setComparison({ fromVersion: comparison.fromVersion, toVersion: comparison.toVersion, changed: comparison.changed, masked: true })}>{comparison.masked ? "Reveal for 15 seconds" : "Mask now"}</button></section> : null}
+          {versions.length === 0 && error === null ? <p className="drawer-loading">Loading encrypted history…</p> : versions.map((version) => <article key={version.version} className={version.current ? "current" : ""}><i /><div><strong>Version {version.version}{version.current ? <span>current</span> : null}</strong><p>{version.changeNote ?? "No change note"}</p><small>{new Date(version.createdAt).toLocaleString()} · key v{version.encryptionKeyVersion}</small>{!version.current ? <div className="version-actions"><button type="button" disabled={busy} onClick={() => void compare(version.version, false)}>Compare</button><button type="button" disabled={busy} onClick={() => void rollback(version.version)}>Rollback</button></div> : null}</div></article>)}
+        </div>
+        <footer><span>{secret.currentVersion} immutable version{secret.currentVersion === 1 ? "" : "s"}</span><button className="secondary-button" type="button" onClick={onClose}>Done</button></footer>
+      </aside>
+    </div>
+  );
 }

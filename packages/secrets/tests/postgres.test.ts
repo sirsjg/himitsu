@@ -146,6 +146,34 @@ test("updates values immutably and enforces key, value, and uniqueness validatio
       )).rows[0]?.count,
       2,
     );
+    const masked = await secrets.compareVersions(transaction, memberA, databaseSecretId, 1, 2);
+    assert.deepEqual(masked, { fromVersion: 1, toVersion: 2, changed: true, masked: true });
+    const revealed = await secrets.compareVersions(transaction, memberA, databaseSecretId, 1, 2, true);
+    assert.equal(revealed.fromValue, "postgres://app:correct-horse@example/database");
+    assert.equal(revealed.toValue, "postgres://rotated");
+    assert.equal(revealed.masked, false);
+
+    const rolledBack = await secrets.rollback(transaction, memberA, databaseSecretId, 1, {
+      expectedVersion: 2,
+      changeNote: "restore original connection",
+    });
+    assert.equal(rolledBack.currentVersion, 3);
+    assert.equal((await secrets.get(transaction, memberA, databaseSecretId)).value, "postgres://app:correct-horse@example/database");
+    assert.equal((await secrets.compareVersions(transaction, memberA, databaseSecretId, 1, 3)).changed, false);
+    const rollbackVersion = await transaction.query<{ change_note: string | null; ciphertext: Buffer }>(
+      "SELECT change_note, value_ciphertext AS ciphertext FROM secret_versions WHERE secret_id = $1 AND version = 3",
+      [databaseSecretId],
+    );
+    assert.equal(rollbackVersion.rows[0]?.change_note, "restore original connection");
+    assert.notDeepEqual(rollbackVersion.rows[0]?.ciphertext, versions.rows[0]?.ciphertext);
+    await assert.rejects(
+      secrets.rollback(transaction, memberA, databaseSecretId, 3),
+      (error: unknown) => error instanceof SecretError && error.code === "INVALID_INPUT",
+    );
+    await assert.rejects(
+      secrets.compareVersions(transaction, memberA, databaseSecretId, 1, 99),
+      (error: unknown) => error instanceof SecretError && error.code === "VERSION_NOT_FOUND",
+    );
   });
 
   await assert.rejects(
@@ -244,7 +272,7 @@ test("bulk-sets atomically and soft-deletes without removing ciphertext history"
       { key: "FEATURE_FLAG", value: "enabled" },
     ]);
     assert.deepEqual(result.map(({ key }) => key), ["DATABASE_URL", "CACHE_URL", "FEATURE_FLAG"]);
-    assert.equal(result[0]?.currentVersion, 3);
+    assert.equal(result[0]?.currentVersion, 4);
     await assert.rejects(
       secrets.bulkSet(transaction, memberA, projectA, developmentEnvironmentId, [
         { key: "DUPLICATE", value: "one" },

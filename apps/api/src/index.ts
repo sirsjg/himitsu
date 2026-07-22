@@ -170,6 +170,18 @@ const versionSchema = {
     createdAt: dateTime, current: { type: "boolean" },
   },
 } as const;
+const versionComparisonSchema = {
+  type: "object", additionalProperties: false,
+  required: ["fromVersion", "toVersion", "changed", "masked"],
+  properties: {
+    fromVersion: { type: "integer", minimum: 1 },
+    toVersion: { type: "integer", minimum: 1 },
+    changed: { type: "boolean" },
+    masked: { type: "boolean" },
+    fromValue: { type: "string" },
+    toValue: { type: "string" },
+  },
+} as const;
 const dotenvIssueSchema = {
   type: "object",
   additionalProperties: false,
@@ -297,6 +309,8 @@ export const apiRoutePermissions = Object.freeze({
   updateSecret: "secret.write",
   deleteSecret: "secret.delete",
   listSecretVersions: "secret.read",
+  compareSecretVersions: "secret.read",
+  rollbackSecretVersion: "secret.write",
   previewDotenvImport: "secret.write",
   commitDotenvImport: "secret.write",
   previewJsonImport: "secret.write",
@@ -963,6 +977,46 @@ function registerSecretRoutes(
     const all = await dependencies.secrets.listVersions(transaction, context.userId, params(request).secretId ?? "");
     return paginated(all, request.query as PageQuery);
   }));
+  app.get("/api/v1/secrets/:secretId/versions/compare", {
+    schema: {
+      operationId: "compareSecretVersions", tags: ["versions"], params: secretParams,
+      querystring: {
+        type: "object", additionalProperties: false, required: ["from", "to"],
+        properties: { from: { type: "integer", minimum: 1 }, to: { type: "integer", minimum: 1 }, reveal: { type: "boolean", default: false } },
+      },
+      response: apiResponses(versionComparisonSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const query = request.query as { from: number; to: number; reveal?: boolean };
+    return { data: await dependencies.secrets.compareVersions(
+      transaction,
+      context.userId,
+      params(request).secretId ?? "",
+      query.from,
+      query.to,
+      query.reveal ?? false,
+    ) };
+  }));
+  app.post("/api/v1/secrets/:secretId/versions/:version/rollback", {
+    schema: {
+      operationId: "rollbackSecretVersion", tags: ["versions"],
+      params: idParams({ secretId: uuid, version: { type: "integer", minimum: 1 } }),
+      body: {
+        type: "object", additionalProperties: false,
+        properties: { expectedVersion: { type: "integer", minimum: 1 }, changeNote: { type: ["string", "null"], maxLength: 1000 } },
+      },
+      response: apiResponses(secretMetadataSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const routeParams = request.params as { secretId: string; version: number };
+    return { data: await dependencies.secrets.rollback(
+      transaction,
+      context.userId,
+      routeParams.secretId,
+      routeParams.version,
+      request.body as Parameters<SecretService["rollback"]>[4],
+    ) };
+  }));
 }
 
 function registerTagRoutes(app: FastifyInstance, withTenant: WithTenant): void {
@@ -1247,7 +1301,7 @@ function mapError(error: unknown): ApiError {
     return new ApiError(401, "UNAUTHENTICATED", "Session is invalid or expired");
   }
   if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError) {
-    if (error.code === "NOT_FOUND") return new ApiError(404, "NOT_FOUND", error.message);
+    if (error.code === "NOT_FOUND" || error.code === "VERSION_NOT_FOUND") return new ApiError(404, error.code, error.message);
     if (error.code.endsWith("EXISTS") || error.code === "VERSION_CONFLICT") return new ApiError(409, error.code, error.message);
     return new ApiError(400, error.code, error.message);
   }

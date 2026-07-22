@@ -334,6 +334,19 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   assert.equal(updated.statusCode, 200, updated.body);
   assert.equal(updated.json().data.currentVersion, 2);
 
+  const maskedComparison = await app.inject({
+    method: "GET", url: `/api/v1/secrets/${secretId}/versions/compare?from=1&to=2`, headers: headers(orgA, memberA),
+  });
+  assert.equal(maskedComparison.statusCode, 200, maskedComparison.body);
+  assert.deepEqual(maskedComparison.json().data, { fromVersion: 1, toVersion: 2, changed: true, masked: true });
+  assert.equal(maskedComparison.body.includes("postgres://"), false);
+  const revealedComparison = await app.inject({
+    method: "GET", url: `/api/v1/secrets/${secretId}/versions/compare?from=1&to=2&reveal=true`, headers: headers(orgA, memberA),
+  });
+  assert.equal(revealedComparison.statusCode, 200, revealedComparison.body);
+  assert.equal(revealedComparison.json().data.fromValue, "postgres://api-first");
+  assert.equal(revealedComparison.json().data.toValue, "postgres://api-second");
+
   const staleUpdate = await app.inject({
     method: "PATCH", url: `/api/v1/secrets/${secretId}`, headers: { ...headers(orgA, memberA), "if-match": '"1"' },
     payload: { value: "postgres://stale-write" },
@@ -362,18 +375,35 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   assert.equal(bulkGet.statusCode, 200, bulkGet.body);
   assert.deepEqual(bulkGet.json().data, { DATABASE_URL: "postgres://api-second", FEATURE_FLAG: "on" });
 
+  const rollback = await app.inject({
+    method: "POST",
+    url: `/api/v1/secrets/${secretId}/versions/1/rollback`,
+    headers: headers(orgA, memberA),
+    payload: { expectedVersion: 2, changeNote: "API rollback" },
+  });
+  assert.equal(rollback.statusCode, 200, rollback.body);
+  assert.equal(rollback.json().data.currentVersion, 3);
+  const staleRollback = await app.inject({
+    method: "POST",
+    url: `/api/v1/secrets/${secretId}/versions/1/rollback`,
+    headers: headers(orgA, memberA),
+    payload: { expectedVersion: 2 },
+  });
+  assert.equal(staleRollback.statusCode, 409, staleRollback.body);
+  assert.equal(staleRollback.json().error.code, "VERSION_CONFLICT");
+
   const versions = await app.inject({
     method: "GET", url: `/api/v1/secrets/${secretId}/versions?limit=1`, headers: headers(orgA, memberA),
   });
   assert.equal(versions.statusCode, 200, versions.body);
-  assert.equal(versions.json().meta.total, 2);
-  assert.equal(versions.json().data[0].version, 2);
+  assert.equal(versions.json().meta.total, 3);
+  assert.equal(versions.json().data[0].version, 3);
   assert.equal(versions.json().data[0].current, true);
   assert.equal("value" in versions.json().data[0], false);
 
   const read = await app.inject({ method: "GET", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA) });
   assert.equal(read.statusCode, 200, read.body);
-  assert.equal(read.json().data.value, "postgres://api-second");
+  assert.equal(read.json().data.value, "postgres://api-first");
 
   const deleted = await app.inject({ method: "DELETE", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA) });
   assert.equal(deleted.statusCode, 200, deleted.body);

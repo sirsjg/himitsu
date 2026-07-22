@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { AuditEventInput, AuditTransaction, TransactionalAuditLog } from "@himitsu/audit";
 import { AuthorizationContextResolver, requirePermission } from "@himitsu/authz";
 import {
@@ -20,6 +20,7 @@ export class SecretError extends Error {
     | "VALUE_TOO_LARGE"
     | "KEY_EXISTS"
     | "VERSION_CONFLICT"
+    | "VERSION_NOT_FOUND"
     | "NOT_FOUND";
 
   constructor(code: SecretError["code"], message: string) {
@@ -92,6 +93,19 @@ interface SecretValueRow extends SecretRow {
   nonce: Buffer;
   auth_tag: Buffer;
   encryption_key_version: number;
+}
+
+interface SecretVersionValueRow extends SecretValueRow {
+  record_version: number;
+}
+
+export interface SecretVersionComparison {
+  readonly fromVersion: number;
+  readonly toVersion: number;
+  readonly changed: boolean;
+  readonly masked: boolean;
+  readonly fromValue?: string;
+  readonly toValue?: string;
 }
 
 interface AuditRecorder {
@@ -265,6 +279,106 @@ export class SecretService {
       createdAt: row.created_at,
       current: row.version === secret.current_version,
     }));
+  }
+
+  async compareVersions(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    secretId: string,
+    fromVersion: number,
+    toVersion: number,
+    reveal = false,
+  ): Promise<SecretVersionComparison> {
+    if (!Number.isInteger(fromVersion) || fromVersion < 1 || !Number.isInteger(toVersion) || toVersion < 1) {
+      throw new SecretError("INVALID_INPUT", "Version numbers must be positive integers");
+    }
+    const secret = await this.#metadataRow(transaction, secretId);
+    const environment = await this.#environment(transaction, secret.project_id, secret.environment_id);
+    requirePermission(
+      await this.#resolver.resolve(transaction, actorUserId, secret.project_id, environment.protected),
+      "secret.read",
+    );
+    const rows = await transaction.query<SecretVersionValueRow>(
+      `SELECT ${secretColumns}, sv.version AS record_version, sv.value_ciphertext,
+              sv.nonce, sv.auth_tag, sv.encryption_key_version
+       FROM secrets s
+       JOIN secret_versions sv ON sv.org_id = s.org_id AND sv.secret_id = s.id
+       WHERE s.id = $1 AND s.deleted_at IS NULL AND sv.version = ANY($2::integer[])
+       ORDER BY sv.version`,
+      [secretId, [...new Set([fromVersion, toVersion])]],
+    );
+    const byVersion = new Map(rows.rows.map((row) => [row.record_version, row]));
+    const from = byVersion.get(fromVersion);
+    const to = byVersion.get(toVersion);
+    if (from === undefined || to === undefined) throw new SecretError("VERSION_NOT_FOUND", "Secret version not found");
+    const encryption = this.#encryption(transaction);
+    const fromPlaintext = await encryption.decrypt(this.#encrypted(from), this.#versionContext(from));
+    const toPlaintext = fromVersion === toVersion
+      ? Buffer.from(fromPlaintext)
+      : await encryption.decrypt(this.#encrypted(to), this.#versionContext(to));
+    try {
+      const changed = fromPlaintext.length !== toPlaintext.length
+        || !timingSafeEqual(fromPlaintext, toPlaintext);
+      await this.#audit.recordInTransaction(transaction, {
+        orgId: transaction.orgId,
+        actor: { type: "user", id: actorUserId },
+        action: "secret.read",
+        resource: { type: "secret", id: secretId },
+        projectId: secret.project_id,
+        environmentId: secret.environment_id,
+        details: { operation: "version_compare", fromVersion, toVersion, revealed: reveal, changed },
+      });
+      return {
+        fromVersion,
+        toVersion,
+        changed,
+        masked: !reveal,
+        ...(reveal ? { fromValue: fromPlaintext.toString("utf8"), toValue: toPlaintext.toString("utf8") } : {}),
+      };
+    } finally {
+      fromPlaintext.fill(0);
+      toPlaintext.fill(0);
+      encryption.clearKeyCache();
+    }
+  }
+
+  async rollback(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    secretId: string,
+    targetVersion: number,
+    input: { expectedVersion?: number; changeNote?: string | null } = {},
+  ): Promise<SecretMetadata> {
+    if (!Number.isInteger(targetVersion) || targetVersion < 1) {
+      throw new SecretError("INVALID_INPUT", "Rollback version must be a positive integer");
+    }
+    const before = await this.#metadataRow(transaction, secretId, true);
+    const environment = await this.#environment(transaction, before.project_id, before.environment_id);
+    requirePermission(
+      await this.#resolver.resolve(transaction, actorUserId, before.project_id, environment.protected),
+      "secret.write",
+    );
+    if (input.expectedVersion !== undefined && input.expectedVersion !== before.current_version) {
+      throw new SecretError("VERSION_CONFLICT", `Secret is at version ${before.current_version}; refresh before rolling back version ${input.expectedVersion}`);
+    }
+    if (targetVersion >= before.current_version) {
+      throw new SecretError("INVALID_INPUT", "Rollback target must be an earlier version");
+    }
+    const target = await this.#versionValueRow(transaction, secretId, targetVersion);
+    const encryption = this.#encryption(transaction);
+    const plaintext = await encryption.decrypt(this.#encrypted(target), this.#versionContext(target));
+    try {
+      return await this.#writeVersion(
+        transaction,
+        actorUserId,
+        before,
+        { value: plaintext.toString("utf8"), changeNote: input.changeNote ?? `Rollback to version ${targetVersion}` },
+        "secret.updated",
+      );
+    } finally {
+      plaintext.fill(0);
+      encryption.clearKeyCache();
+    }
   }
 
   async create(
@@ -642,6 +756,24 @@ export class SecretService {
     return row;
   }
 
+  async #versionValueRow(
+    transaction: TenantTransaction,
+    secretId: string,
+    version: number,
+  ): Promise<SecretVersionValueRow> {
+    const result = await transaction.query<SecretVersionValueRow>(
+      `SELECT ${secretColumns}, sv.version AS record_version, sv.value_ciphertext,
+              sv.nonce, sv.auth_tag, sv.encryption_key_version
+       FROM secrets s
+       JOIN secret_versions sv ON sv.org_id = s.org_id AND sv.secret_id = s.id
+       WHERE s.id = $1 AND s.deleted_at IS NULL AND sv.version = $2`,
+      [secretId, version],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new SecretError("VERSION_NOT_FOUND", "Secret version not found");
+    return row;
+  }
+
   async #environment(
     transaction: TenantTransaction,
     projectId: string,
@@ -674,6 +806,16 @@ export class SecretService {
       ciphertext: row.value_ciphertext,
       nonce: row.nonce,
       authTag: row.auth_tag,
+    };
+  }
+
+  #versionContext(row: SecretVersionValueRow) {
+    return {
+      orgId: row.org_id,
+      projectId: row.project_id,
+      environmentId: row.environment_id,
+      secretId: row.id,
+      recordVersion: row.record_version,
     };
   }
 }

@@ -191,3 +191,23 @@ test("project detail renders environment browsing and masked secret editing cont
   assert.match(html, />v7</);
   assert.doesNotMatch(html, /postgres:\/\//);
 });
+
+test("version client compares masked or revealed history and rolls back with a precondition", async () => {
+  const calls: Array<{ input: string; body?: unknown }> = [];
+  const client = createSecretClient(async (input, init) => {
+    calls.push({ input, ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) });
+    const data = input.includes("/compare")
+      ? { fromVersion: 1, toVersion: 3, changed: true, masked: !input.includes("reveal=true") }
+      : { id: "secret/id", environmentId: "environment-id", key: "DATABASE_URL", notes: null, currentVersion: 4, updatedAt: "2026-07-22T00:00:00.000Z" };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+
+  assert.equal((await client.compareVersions("secret/id", 1, 3)).masked, true);
+  assert.equal((await client.compareVersions("secret/id", 1, 3, true)).masked, false);
+  assert.equal((await client.rollbackVersion("secret/id", 1, 3)).currentVersion, 4);
+  assert.deepEqual(calls, [
+    { input: "/api/v1/secrets/secret%2Fid/versions/compare?from=1&to=3" },
+    { input: "/api/v1/secrets/secret%2Fid/versions/compare?from=1&to=3&reveal=true" },
+    { input: "/api/v1/secrets/secret%2Fid/versions/1/rollback", body: { expectedVersion: 3, changeNote: "Rollback to version 1" } },
+  ]);
+});

@@ -299,6 +299,18 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .version-timeline article strong span { padding: 3px 6px; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); font-size: 7px; }
 .version-timeline article p { margin: 7px 0 5px; color: var(--muted); font-size: 10px; }
 .version-timeline article small { color: var(--faint); font-family: "DM Mono", monospace; font-size: 7px; }
+.version-actions { display: flex; gap: 6px; margin-top: 10px; }
+.version-actions button, .version-comparison > button { padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--surface-2); font-family: "DM Mono", monospace; font-size: 7px; cursor: pointer; }
+.version-actions button:hover, .version-comparison > button:hover { color: var(--accent); border-color: var(--accent); }
+.version-actions button:last-child:hover { color: var(--danger); border-color: var(--danger); }
+.version-comparison { display: grid; gap: 10px; margin-bottom: 22px; padding: 14px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: 7px; background: color-mix(in srgb, var(--accent) 5%, var(--surface-2)); }
+.version-comparison > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.version-comparison > header strong { font-family: "DM Mono", monospace; font-size: 9px; }
+.version-comparison > header span { color: var(--accent); font-size: 8px; }
+.version-comparison > div { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; }
+.version-comparison code { min-width: 0; overflow: hidden; padding: 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--bg); font-family: "DM Mono", monospace; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.version-comparison b { color: var(--faint); font-size: 9px; }
+.version-comparison > button { justify-self: start; }
 .drawer-error, .drawer-loading { color: var(--muted); font-size: 10px; }
 .drawer-error { color: var(--danger); }
 .version-drawer > footer { display: flex; align-items: center; justify-content: space-between; padding-top: 17px; border-top: 1px solid var(--line); color: var(--faint); font-family: "DM Mono", monospace; font-size: 8px; }
