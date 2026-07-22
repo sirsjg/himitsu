@@ -1,0 +1,10 @@
+BEGIN;
+DROP POLICY IF EXISTS tenant_isolation ON consistency_finding_states;
+ALTER TABLE consistency_finding_states NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE consistency_finding_states DISABLE ROW LEVEL SECURITY;
+DROP TABLE IF EXISTS consistency_finding_states;
+DROP POLICY IF EXISTS tenant_isolation ON consistency_report_cache;
+ALTER TABLE consistency_report_cache NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE consistency_report_cache DISABLE ROW LEVEL SECURITY;
+DROP TABLE IF EXISTS consistency_report_cache;
+COMMIT;
