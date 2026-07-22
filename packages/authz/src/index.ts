@@ -157,6 +157,41 @@ export function authorizationSnapshot(
   );
 }
 
+export const uiActionPermissions = Object.freeze({
+  createProject: "project.create",
+  editProject: "project.update",
+  archiveProject: "project.archive",
+  deleteProject: "project.delete",
+  createEnvironment: "environment.create",
+  editEnvironment: "environment.update",
+  deleteEnvironment: "environment.delete",
+  revealSecret: "secret.read",
+  editSecret: "secret.write",
+  deleteSecret: "secret.delete",
+  viewApiKeys: "api_key.read",
+  createApiKey: "api_key.create",
+  revokeApiKey: "api_key.revoke",
+  viewAuditLog: "audit.read",
+  exportAuditLog: "audit.export",
+  inviteMember: "org.members.invite",
+  manageMembers: "org.members.manage",
+  editOrganization: "org.settings.update",
+  deleteOrganization: "org.settings.delete",
+} satisfies Readonly<Record<string, Permission>>);
+
+export type UiAction = keyof typeof uiActionPermissions;
+
+export function uiActionSnapshot(
+  context: AuthorizationContext,
+): Readonly<Record<UiAction, boolean>> {
+  return Object.freeze(Object.fromEntries(
+    Object.entries(uiActionPermissions).map(([action, permission]) => [
+      action,
+      authorize(context, permission).allowed,
+    ]),
+  ) as Record<UiAction, boolean>);
+}
+
 export class AuthorizationContextResolver {
   async resolve(
     transaction: TenantTransaction,

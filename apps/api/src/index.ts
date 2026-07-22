@@ -2,7 +2,12 @@ import swagger from "@fastify/swagger";
 import { ApiKeyError, type ApiKeyPrincipal, type ApiKeyService } from "@himitsu/api-keys";
 import type { TransactionalAuditLog } from "@himitsu/audit";
 import { AuthError, sessionCookie, type AuthService } from "@himitsu/auth";
-import { AuthorizationContextResolver, AuthorizationError, requirePermission } from "@himitsu/authz";
+import {
+  AuthorizationContextResolver,
+  AuthorizationError,
+  requirePermission,
+  type Permission,
+} from "@himitsu/authz";
 import { EnvironmentError, type EnvironmentService } from "@himitsu/environments";
 import { ProjectError, type ProjectService } from "@himitsu/projects";
 import { SecretError, type SecretService } from "@himitsu/secrets";
@@ -180,6 +185,35 @@ const createdApiKeySchema = {
   properties: { apiKey: apiKeySchema, token: { type: "string", pattern: "^himi_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$" } },
 } as const;
 const stringMapSchema = { type: "object", additionalProperties: { type: "string" } } as const;
+
+export const apiRoutePermissions = Object.freeze({
+  listProjects: "project.read",
+  createProject: "project.create",
+  getProject: "project.read",
+  updateProject: "project.update",
+  deleteProject: "project.delete",
+  listEnvironments: "environment.read",
+  createEnvironment: "environment.create",
+  reorderEnvironments: "environment.update",
+  getEnvironment: "environment.read",
+  updateEnvironment: "environment.update",
+  deleteEnvironment: "environment.delete",
+  listSecrets: "secret.read",
+  createSecret: "secret.write",
+  bulkSetSecrets: "secret.write",
+  bulkGetSecrets: "secret.read",
+  getSecret: "secret.read",
+  updateSecret: "secret.write",
+  deleteSecret: "secret.delete",
+  listSecretVersions: "secret.read",
+  listTags: "org.settings.read",
+  createTag: "org.settings.update",
+  updateTag: "org.settings.update",
+  deleteTag: "org.settings.update",
+  listApiKeys: "api_key.read",
+  createApiKey: "api_key.create",
+  revokeApiKey: "api_key.revoke",
+} satisfies Readonly<Record<string, Permission>>);
 
 export interface RateLimitDecision {
   readonly allowed: boolean;
@@ -363,6 +397,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
   const app = Fastify({ logger: false, ajv: { customOptions: { coerceTypes: true } } });
   const contexts = new WeakMap<FastifyRequest, ApiRequestContext>();
   const rateLimiter = new InMemoryRateLimiter(dependencies.rateLimits);
+  const routeAuthorization = new AuthorizationContextResolver();
   await app.register(swagger, {
     openapi: {
       openapi: "3.1.0",
@@ -412,6 +447,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     if (context === undefined) throw new ApiError(401, "UNAUTHENTICATED", "Authentication is required");
     return dependencies.database.withOrg(context.orgId, context.userId, async (transaction) => {
       await enforceApiKeyScope(request, transaction, context);
+      await enforceRoutePermission(request, transaction, context, routeAuthorization);
       return work(transaction, context);
     });
   };
@@ -835,6 +871,59 @@ function isReadOperation(request: FastifyRequest): boolean {
 
 function routePath(request: FastifyRequest): string {
   return request.routeOptions.url ?? request.url.split("?", 1)[0] ?? "";
+}
+
+function routeOperationId(request: FastifyRequest): string | undefined {
+  return (request.routeOptions.schema as { operationId?: string } | undefined)?.operationId;
+}
+
+async function enforceRoutePermission(
+  request: FastifyRequest,
+  transaction: TenantTransaction,
+  context: ApiRequestContext,
+  resolver: AuthorizationContextResolver,
+): Promise<void> {
+  const operationId = routeOperationId(request);
+  const permission = operationId === undefined ? undefined : apiRoutePermissions[operationId as keyof typeof apiRoutePermissions];
+  if (permission === undefined) {
+    throw new ApiError(500, "AUTHORIZATION_POLICY_MISSING", "Route authorization policy is missing");
+  }
+  const requestParams = params(request);
+  let projectId = requestParams.projectId;
+  let protectedEnvironment = false;
+  if (requestParams.secretId !== undefined) {
+    const secret = await transaction.query<{ project_id: string; protected: boolean }>(
+      `SELECT secret.project_id, environment.protected
+       FROM secrets secret
+       JOIN environments environment ON environment.id = secret.environment_id
+       WHERE secret.id = $1 AND secret.deleted_at IS NULL AND environment.deleted_at IS NULL`,
+      [requestParams.secretId],
+    );
+    projectId = secret.rows[0]?.project_id;
+    protectedEnvironment = secret.rows[0]?.protected ?? false;
+  } else if (requestParams.environmentId !== undefined) {
+    const environment = await transaction.query<{ project_id: string; protected: boolean }>(
+      "SELECT project_id, protected FROM environments WHERE id = $1 AND deleted_at IS NULL",
+      [requestParams.environmentId],
+    );
+    projectId = environment.rows[0]?.project_id ?? projectId;
+    protectedEnvironment = environment.rows[0]?.protected ?? false;
+  } else if (operationId === "createApiKey") {
+    const body = request.body as { projectId?: string | null; environmentId?: string | null };
+    projectId = body.projectId ?? undefined;
+    if (body.environmentId !== null && body.environmentId !== undefined) {
+      const environment = await transaction.query<{ project_id: string; protected: boolean }>(
+        "SELECT project_id, protected FROM environments WHERE id = $1 AND deleted_at IS NULL",
+        [body.environmentId],
+      );
+      projectId = environment.rows[0]?.project_id ?? projectId;
+      protectedEnvironment = environment.rows[0]?.protected ?? false;
+    }
+  }
+  requirePermission(
+    await resolver.resolve(transaction, context.userId, projectId, protectedEnvironment),
+    permission,
+  );
 }
 
 async function enforceApiKeyScope(

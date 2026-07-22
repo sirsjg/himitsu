@@ -11,7 +11,7 @@ import { ProjectService } from "@himitsu/projects";
 import { SecretService } from "@himitsu/secrets";
 import { TenantDatabase } from "@himitsu/tenancy";
 import { Pool } from "pg";
-import { buildApi } from "../src/index.js";
+import { apiRoutePermissions, buildApi } from "../src/index.js";
 
 const adminConnectionString = process.env.TEST_DATABASE_URL;
 const appConnectionString = process.env.TEST_APP_DATABASE_URL;
@@ -30,15 +30,18 @@ const auth = new AuthService(appPool, {
 const resolver = new AuthorizationContextResolver();
 const ownerA = randomUUID();
 const memberA = randomUUID();
+const readerA = randomUUID();
 const ownerB = randomUUID();
 const orgA = randomUUID();
 const orgB = randomUUID();
 const sessionTokens = new Map<string, { session: string; csrf: string }>([
   [ownerA, { session: `session-${randomUUID()}`, csrf: `csrf-${randomUUID()}` }],
   [memberA, { session: `session-${randomUUID()}`, csrf: `csrf-${randomUUID()}` }],
+  [readerA, { session: `session-${randomUUID()}`, csrf: `csrf-${randomUUID()}` }],
   [ownerB, { session: `session-${randomUUID()}`, csrf: `csrf-${randomUUID()}` }],
 ]);
 const revokedSessionToken = `session-${randomUUID()}`;
+let otherOrgSecretId = "";
 const projects = new ProjectService(resolver, audit);
 const apiKeys = new ApiKeyService(appPool, resolver, audit);
 const environments = new EnvironmentService(resolver, audit);
@@ -73,8 +76,8 @@ before(async () => {
   await adminPool.query(
     `INSERT INTO users (id, email, email_verified_at) VALUES
       ($1, 'api-owner-a@example.com', now()), ($2, 'api-member-a@example.com', now()),
-      ($3, 'api-owner-b@example.com', now())`,
-    [ownerA, memberA, ownerB],
+      ($3, 'api-reader-a@example.com', now()), ($4, 'api-owner-b@example.com', now())`,
+    [ownerA, memberA, readerA, ownerB],
   );
   await adminPool.query(
     "INSERT INTO organizations (id, name, slug) VALUES ($1, 'API Alpha', 'api-alpha'), ($2, 'API Beta', 'api-beta')",
@@ -82,10 +85,10 @@ before(async () => {
   );
   await adminPool.query(
     `INSERT INTO memberships (org_id, user_id, role) VALUES
-      ($1, $2, 'owner'), ($1, $3, 'member'), ($4, $5, 'owner')`,
-    [orgA, ownerA, memberA, orgB, ownerB],
+      ($1, $2, 'owner'), ($1, $3, 'member'), ($1, $4, 'read_only'), ($5, $6, 'owner')`,
+    [orgA, ownerA, memberA, readerA, orgB, ownerB],
   );
-  for (const [userId, orgId] of [[ownerA, orgA], [memberA, orgA], [ownerB, orgB]] as const) {
+  for (const [userId, orgId] of [[ownerA, orgA], [memberA, orgA], [readerA, orgA], [ownerB, orgB]] as const) {
     const credentials = sessionTokens.get(userId);
     assert.ok(credentials);
     await adminPool.query(
@@ -99,6 +102,23 @@ before(async () => {
      VALUES ($1, $2, $3, $4, now() + interval '1 day', now())`,
     [ownerA, digest(revokedSessionToken), digest("revoked-csrf"), orgA],
   );
+  await database.withOrg(orgB, ownerB, async (transaction) => {
+    const project = await projects.create(transaction, ownerB, {
+      name: "Other Tenant Project",
+      slug: "other-tenant-project",
+    });
+    const projectEnvironments = await environments.list(transaction, ownerB, project.id);
+    const environment = projectEnvironments.find(({ slug }) => slug === "development");
+    assert.ok(environment);
+    const secret = await secrets.create(
+      transaction,
+      ownerB,
+      project.id,
+      environment.id,
+      { key: "OTHER_TENANT_SECRET", value: "isolated" },
+    );
+    otherOrgSecretId = secret.id;
+  });
 });
 
 after(async () => {
@@ -127,6 +147,10 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
     Object.values(methods).map(({ operationId }) => operationId).filter(Boolean),
   );
   assert.equal(new Set(operationIds).size, operationIds.length);
+  assert.deepEqual(
+    new Set(operationIds.filter((operationId) => operationId !== "getOpenApi")),
+    new Set(Object.keys(apiRoutePermissions)),
+  );
   const projectCreate = document.paths["/api/v1/projects"]?.post as unknown as {
     responses: { "2XX": { content: { "application/json": { schema: { properties: { data: { properties: Record<string, unknown> } } } } } } };
   };
@@ -189,6 +213,34 @@ test("enforces session CSRF and audits attributable failed authentication", asyn
     { method: "session", reason: "INVALID_CSRF" },
     { method: "session", reason: "INVALID_SESSION" },
   ]);
+});
+
+test("enforces route policies for read-only users and RLS for cross-tenant secret IDs", async () => {
+  const readerList = await app.inject({
+    method: "GET", url: "/api/v1/projects", headers: headers(orgA, readerA),
+  });
+  assert.equal(readerList.statusCode, 200, readerList.body);
+  const readerWrite = await app.inject({
+    method: "POST", url: "/api/v1/projects", headers: headers(orgA, readerA),
+    payload: { name: "Denied", slug: "reader-denied" },
+  });
+  assert.equal(readerWrite.statusCode, 403);
+  assert.equal(readerWrite.json().error.code, "FORBIDDEN");
+  const readerApiKeys = await app.inject({
+    method: "GET", url: "/api/v1/api-keys", headers: headers(orgA, readerA),
+  });
+  assert.equal(readerApiKeys.statusCode, 403);
+
+  const crossTenant = await app.inject({
+    method: "GET", url: `/api/v1/secrets/${otherOrgSecretId}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(crossTenant.statusCode, 404, crossTenant.body);
+  assert.equal(crossTenant.json().error.code, "NOT_FOUND");
+  const tenantOwner = await app.inject({
+    method: "GET", url: `/api/v1/secrets/${otherOrgSecretId}`, headers: headers(orgB, ownerB),
+  });
+  assert.equal(tenantOwner.statusCode, 200, tenantOwner.body);
+  assert.equal(tenantOwner.json().data.value, "isolated");
 });
 
 let projectId: string;
@@ -380,6 +432,25 @@ test("manages scoped API keys while revealing token material only at creation", 
   assert.equal(machineRead.headers["ratelimit-limit"], "100");
   assert.ok(Number(machineRead.headers["ratelimit-remaining"]) < 100);
 
+  const secondProject = await app.inject({
+    method: "POST", url: "/api/v1/projects", headers: headers(orgA, ownerA),
+    payload: { name: "Out of Scope Project", slug: "out-of-scope-project" },
+  });
+  assert.equal(secondProject.statusCode, 201, secondProject.body);
+  const crossProjectKey = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${secondProject.json().data.id}`,
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(crossProjectKey.statusCode, 403, crossProjectKey.body);
+  assert.equal(crossProjectKey.json().error.code, "API_SCOPE_FORBIDDEN");
+  const crossTenantKey = await app.inject({
+    method: "GET",
+    url: `/api/v1/secrets/${otherOrgSecretId}`,
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(crossTenantKey.statusCode, 404, crossTenantKey.body);
+
   const machineWrite = await app.inject({
     method: "POST",
     url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
@@ -480,6 +551,12 @@ test("manages scoped API keys while revealing token material only at creation", 
     headers: headers(orgA, ownerA),
   });
   assert.equal(readOnlyRevoked.statusCode, 200, readOnlyRevoked.body);
+  const deletedSecondProject = await app.inject({
+    method: "DELETE",
+    url: `/api/v1/projects/${secondProject.json().data.id}`,
+    headers: headers(orgA, ownerA),
+  });
+  assert.equal(deletedSecondProject.statusCode, 200, deletedSecondProject.body);
 });
 
 test("deletes tags and projects through their v1 lifecycle endpoints", async () => {

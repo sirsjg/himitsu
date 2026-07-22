@@ -9,6 +9,8 @@ import {
   permissions,
   requirePermission,
   roles,
+  uiActionPermissions,
+  uiActionSnapshot,
 } from "../src/index.js";
 
 test("defines a complete permission matrix for all four roles", () => {
@@ -22,6 +24,21 @@ test("defines a complete permission matrix for all four roles", () => {
   assert.equal(permissionMatrix.member.includes("secret.write"), true);
   assert.equal(permissionMatrix.member.includes("api_key.create"), false);
   assert.deepEqual(permissionMatrix.read_only.filter((item) => item.startsWith("secret.")), ["secret.read"]);
+});
+
+test("maps every UI action to the central permission evaluator", () => {
+  const readOnly = { orgRole: "read_only" as const };
+  const capabilities = uiActionSnapshot(readOnly);
+  for (const [action, permission] of Object.entries(uiActionPermissions)) {
+    assert.equal(
+      capabilities[action as keyof typeof capabilities],
+      authorize(readOnly, permission).allowed,
+    );
+  }
+  assert.equal(capabilities.revealSecret, true);
+  assert.equal(capabilities.editSecret, false);
+  assert.equal(capabilities.createApiKey, false);
+  assert.equal(Object.values(uiActionSnapshot({ orgRole: "owner" })).every(Boolean), true);
 });
 
 test("applies project overrides only as capability downgrades", () => {
