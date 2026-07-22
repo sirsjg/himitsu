@@ -57,6 +57,16 @@ export interface ConsistencyReportView {
       readonly secretId: string | null;
     }[];
   }[];
+  readonly findings: readonly {
+    readonly id: string;
+    readonly type: "missing_key" | "empty_value" | "placeholder_value" | "naming_violation" | "case_duplicate";
+    readonly severity: "warning" | "error";
+    readonly key: string;
+    readonly keys: readonly string[];
+    readonly environmentIds: readonly string[];
+    readonly missingEnvironmentIds: readonly string[];
+    readonly disposition: "acknowledged" | "ignored" | null;
+  }[];
   readonly summary: {
     readonly healthy: boolean;
     readonly exitCode: 0 | 1;
@@ -65,6 +75,23 @@ export interface ConsistencyReportView {
     readonly errors: number;
     readonly warnings: number;
   };
+}
+
+export interface SecretPromotionPreviewView {
+  readonly sourceEnvironmentId: string;
+  readonly targetEnvironmentId: string;
+  readonly items: readonly {
+    readonly key: string;
+    readonly action: "create" | "overwrite";
+    readonly changed: boolean;
+    readonly sourceVersion: number;
+    readonly targetVersion: number | null;
+  }[];
+  readonly summary: { readonly selected: number; readonly created: number; readonly overwritten: number };
+}
+
+export interface SecretPromotionResultView extends SecretPromotionPreviewView {
+  readonly secrets: readonly ApiSecretMetadata[];
 }
 
 export interface BulkSecretInput {
@@ -131,6 +158,8 @@ export interface SecretClient {
   compareVersions(secretId: string, fromVersion: number, toVersion: number, reveal?: boolean): Promise<SecretVersionComparisonView>;
   rollbackVersion(secretId: string, targetVersion: number, expectedVersion: number): Promise<ApiSecretMetadata>;
   consistency(projectId: string): Promise<ConsistencyReportView>;
+  previewPromotion(projectId: string, targetEnvironmentId: string, sourceEnvironmentId: string, keys?: readonly string[]): Promise<SecretPromotionPreviewView>;
+  promote(projectId: string, targetEnvironmentId: string, sourceEnvironmentId: string, keys?: readonly string[]): Promise<SecretPromotionResultView>;
 }
 
 export function isConventionalSecretKey(key: string): boolean {
@@ -204,6 +233,8 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
     compareVersions: (secretId, fromVersion, toVersion, reveal = false) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/compare?from=${fromVersion}&to=${toVersion}${reveal ? "&reveal=true" : ""}`),
     rollbackVersion: (secretId, targetVersion, expectedVersion) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/${targetVersion}/rollback`, { method: "POST", body: JSON.stringify({ expectedVersion, changeNote: `Rollback to version ${targetVersion}` }) }),
     consistency: (projectId) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/consistency`),
+    previewPromotion: (projectId, targetEnvironmentId, sourceEnvironmentId, keys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(targetEnvironmentId)}/promotions/preview`, { method: "POST", body: JSON.stringify({ sourceEnvironmentId, ...(keys === undefined ? {} : { keys }) }) }),
+    promote: (projectId, targetEnvironmentId, sourceEnvironmentId, keys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(targetEnvironmentId)}/promotions`, { method: "POST", body: JSON.stringify({ sourceEnvironmentId, ...(keys === undefined ? {} : { keys }) }) }),
   };
 }
 
@@ -236,8 +267,30 @@ export const demoConsistencyReport: ConsistencyReportView = {
       return { environmentId: id, state: secret === undefined ? "missing" as const : "present" as const, secretId: secret?.id ?? null };
     }),
   })),
+  findings: [
+    { id: "missing-stripe", type: "missing_key", severity: "error", key: "STRIPE_SECRET_KEY", keys: ["STRIPE_SECRET_KEY"], environmentIds: ["development"], missingEnvironmentIds: ["staging", "production"], disposition: null },
+    { id: "missing-redis", type: "missing_key", severity: "error", key: "REDIS_URL", keys: ["REDIS_URL"], environmentIds: ["development"], missingEnvironmentIds: ["staging", "production"], disposition: null },
+    { id: "missing-sentry", type: "missing_key", severity: "error", key: "SENTRY_DSN", keys: ["SENTRY_DSN"], environmentIds: ["development"], missingEnvironmentIds: ["staging", "production"], disposition: null },
+  ],
   summary: { healthy: false, exitCode: 1, totalFindings: 3, activeFindings: 3, errors: 3, warnings: 0 },
 };
+
+function demoPromotionPreviews(sourceEnvironmentId: string): Readonly<Record<string, SecretPromotionPreviewView>> {
+  return Object.fromEntries(demoEnvironments.filter(({ id }) => id !== sourceEnvironmentId).map((target) => {
+    const source = demoSecretRows.filter(({ environmentId }) => environmentId === sourceEnvironmentId);
+    const destination = new Map(demoSecretRows.filter(({ environmentId }) => environmentId === target.id).map((secret) => [secret.key, secret]));
+    const items = source.map((secret) => {
+      const existing = destination.get(secret.key);
+      return { key: secret.key, action: existing === undefined ? "create" as const : "overwrite" as const, changed: true, sourceVersion: secret.currentVersion, targetVersion: existing?.currentVersion ?? null };
+    });
+    return [target.id, {
+      sourceEnvironmentId,
+      targetEnvironmentId: target.id,
+      items,
+      summary: { selected: items.length, created: items.filter(({ action }) => action === "create").length, overwritten: items.filter(({ action }) => action === "overwrite").length },
+    }];
+  }));
+}
 
 function metadataToView(metadata: ApiSecretMetadata, tags: readonly string[] = []): SecretView {
   return { ...metadata, tags };
@@ -267,6 +320,12 @@ export function SecretWorkspace({
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [health, setHealth] = useState<ConsistencyReportView | null>(projectId.startsWith("project-") ? demoConsistencyReport : null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [diffSourceEnvironmentId, setDiffSourceEnvironmentId] = useState(environments[0]?.id ?? "");
+  const [promotionPreviews, setPromotionPreviews] = useState<Readonly<Record<string, SecretPromotionPreviewView>>>(
+    projectId.startsWith("project-") ? demoPromotionPreviews(environments[0]?.id ?? "") : {},
+  );
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [promotion, setPromotion] = useState<{ sourceEnvironmentId: string; targetEnvironmentId: string; keys?: readonly string[] } | null>(null);
   const remaskTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const environment = environments.find(({ id }) => id === activeEnvironmentId) ?? environments[0];
   const environmentSecrets = secrets.filter(({ environmentId }) => environmentId === activeEnvironmentId);
@@ -282,7 +341,29 @@ export function SecretWorkspace({
     catch (reason) { setHealthError(reason instanceof Error ? reason.message : "Project health could not be loaded."); }
   };
 
-  useEffect(() => { void refreshHealth(); }, [client, projectId]);
+  const refreshDiff = async (sourceEnvironmentId = diffSourceEnvironmentId) => {
+    if (projectId.startsWith("project-")) {
+      setPromotionPreviews(demoPromotionPreviews(sourceEnvironmentId));
+      setDiffError(null);
+      return;
+    }
+    const targets = environments.filter(({ id }) => id !== sourceEnvironmentId);
+    const results = await Promise.allSettled(targets.map((target) => client.previewPromotion(
+      projectId, target.id, sourceEnvironmentId,
+    )));
+    const loaded: Record<string, SecretPromotionPreviewView> = {};
+    const failures: string[] = [];
+    for (const [index, result] of results.entries()) {
+      const target = targets[index];
+      if (target === undefined) continue;
+      if (result.status === "fulfilled") loaded[target.id] = result.value;
+      else failures.push(`${target.name}: ${result.reason instanceof Error ? result.reason.message : "comparison unavailable"}`);
+    }
+    setPromotionPreviews(loaded);
+    setDiffError(failures.length === 0 ? null : failures.join(" · "));
+  };
+
+  useEffect(() => { void refreshHealth(); void refreshDiff(diffSourceEnvironmentId); }, [client, projectId, diffSourceEnvironmentId]);
 
   useEffect(() => () => {
     for (const timer of remaskTimers.current.values()) clearTimeout(timer);
@@ -400,6 +481,23 @@ export function SecretWorkspace({
     void refreshHealth();
   };
 
+  const finishPromotion = (result: SecretPromotionResultView) => {
+    setSecrets((current) => {
+      const savedByKey = new Map(result.secrets.map((secret) => [secret.key, secret]));
+      const replaced = current.map((secret) => {
+        const saved = secret.environmentId === result.targetEnvironmentId ? savedByKey.get(secret.key) : undefined;
+        if (saved === undefined) return secret;
+        savedByKey.delete(secret.key);
+        return metadataToView(saved, secret.tags);
+      });
+      return [...replaced, ...[...savedByKey.values()].map((secret) => metadataToView(secret))];
+    });
+    setPromotion(null);
+    setNotice({ kind: "success", message: `Promotion complete: ${result.summary.created} created, ${result.summary.overwritten} overwritten.` });
+    void refreshHealth();
+    void refreshDiff(result.sourceEnvironmentId);
+  };
+
   const fixHealthCell = (key: string, cell: ConsistencyReportView["matrix"][number]["cells"][number]) => {
     setActiveEnvironmentId(cell.environmentId);
     setActiveTag(null);
@@ -417,7 +515,18 @@ export function SecretWorkspace({
         <div><span className="kicker">Project vault</span><h1>{projectName}</h1><p>Reveal only what you need. Values automatically return to a masked state after 15 seconds.</p></div>
         <div className="secret-actions"><button className="secondary-button" type="button" onClick={() => setBulkOpen(true)}>Bulk paste</button><button className="primary-button" type="button" onClick={() => setEditor({ mode: "add" })}>＋ Add secret</button></div>
       </section>
-      <ConsistencyHealthPanel report={health} environments={environments} error={healthError} onFix={fixHealthCell} onRefresh={() => void refreshHealth()} />
+      <ConsistencyHealthPanel
+        report={health}
+        environments={environments}
+        error={healthError}
+        diffError={diffError}
+        sourceEnvironmentId={diffSourceEnvironmentId}
+        previews={promotionPreviews}
+        onFix={fixHealthCell}
+        onRefresh={() => { void refreshHealth(); void refreshDiff(); }}
+        onSourceChange={(sourceEnvironmentId) => { setDiffSourceEnvironmentId(sourceEnvironmentId); setPromotionPreviews(projectId.startsWith("project-") ? demoPromotionPreviews(sourceEnvironmentId) : {}); setPromotion(null); }}
+        onPromote={(targetEnvironmentId, keys) => setPromotion({ sourceEnvironmentId: diffSourceEnvironmentId, targetEnvironmentId, ...(keys === undefined ? {} : { keys }) })}
+      />
       <nav className="environment-tabs" aria-label="Project environments">
         {environments.map((item) => <button key={item.id} type="button" className={item.id === activeEnvironmentId ? "active" : ""} onClick={() => { setActiveEnvironmentId(item.id); setActiveTag(null); }}><span>{item.name}</span><small>{secrets.filter(({ environmentId }) => environmentId === item.id).length}</small>{item.protected ? <b title="Protected environment">◆</b> : null}</button>)}
       </nav>
@@ -446,28 +555,104 @@ export function SecretWorkspace({
       </section>
       {bulkOpen && environment ? <DotenvImport projectId={projectId} environmentId={environment.id} client={client} onCancel={() => setBulkOpen(false)} onImported={finishImport} /> : null}
       {historySecret ? <VersionDrawer secret={historySecret} client={client} onClose={() => setHistorySecret(null)} onRolledBack={finishRollback} /> : null}
+      {promotion ? <PromotionDialog
+        projectId={projectId}
+        environments={environments}
+        request={promotion}
+        preview={promotionPreviews[promotion.targetEnvironmentId] ?? null}
+        client={client}
+        onCancel={() => setPromotion(null)}
+        onPromoted={finishPromotion}
+      /> : null}
     </div>
   );
 }
 
-function ConsistencyHealthPanel({ report, environments, error, onFix, onRefresh }: {
+export type PromotionMarker = "source" | "missing" | "changed" | "same" | "target-only";
+
+export function promotionMarker(
+  sourceEnvironmentId: string,
+  cell: { readonly environmentId: string; readonly state: "present" | "missing" | "empty" },
+  item?: SecretPromotionPreviewView["items"][number],
+): PromotionMarker {
+  if (cell.environmentId === sourceEnvironmentId) return "source";
+  if (item?.action === "create" || cell.state === "missing") return "missing";
+  if (item !== undefined) return item.changed ? "changed" : "same";
+  return "target-only";
+}
+
+function findingLabel(type: ConsistencyReportView["findings"][number]["type"]): string {
+  return ({ missing_key: "missing", empty_value: "empty", placeholder_value: "placeholder", naming_violation: "naming", case_duplicate: "case conflict" })[type];
+}
+
+function ConsistencyHealthPanel({ report, environments, error, diffError, sourceEnvironmentId, previews, onFix, onRefresh, onSourceChange, onPromote }: {
   report: ConsistencyReportView | null;
   environments: readonly EnvironmentView[];
   error: string | null;
+  diffError: string | null;
+  sourceEnvironmentId: string;
+  previews: Readonly<Record<string, SecretPromotionPreviewView>>;
   onFix: (key: string, cell: ConsistencyReportView["matrix"][number]["cells"][number]) => void;
   onRefresh: () => void;
+  onSourceChange: (environmentId: string) => void;
+  onPromote: (targetEnvironmentId: string, keys?: readonly string[]) => void;
 }): ReactNode {
   const environmentById = new Map(environments.map((environment) => [environment.id, environment]));
+  const availableTargets = environments.filter(({ id }) => id !== sourceEnvironmentId);
+  const [targetEnvironmentId, setTargetEnvironmentId] = useState(availableTargets[0]?.id ?? "");
+  useEffect(() => {
+    if (targetEnvironmentId === sourceEnvironmentId || !availableTargets.some(({ id }) => id === targetEnvironmentId)) {
+      setTargetEnvironmentId(availableTargets[0]?.id ?? "");
+    }
+  }, [sourceEnvironmentId, targetEnvironmentId, environments]);
+  const targetPreview = previews[targetEnvironmentId];
   return <section className="health-panel" aria-label="Project consistency health">
-    <header><div><span className="kicker">Consistency check</span><h2>{report?.summary.healthy ? "Environments aligned" : "Configuration drift"}</h2></div><div className="health-summary"><strong>{report?.summary.activeFindings ?? "—"}<span>active findings</span></strong><strong>{report?.summary.exitCode ?? "—"}<span>CI exit code</span></strong><button type="button" onClick={onRefresh}>Refresh</button></div></header>
+    <header><div><span className="kicker">Cross-environment diff</span><h2>{report?.summary.healthy ? "Environments aligned" : "Configuration drift"}</h2></div><div className="health-summary"><strong>{report?.summary.activeFindings ?? "—"}<span>active findings</span></strong><strong>{report?.summary.exitCode ?? "—"}<span>CI exit code</span></strong><button type="button" onClick={onRefresh}>Refresh</button></div></header>
+    <div className="diff-controls">
+      <label>Baseline environment<select aria-label="Baseline environment" value={sourceEnvironmentId} onChange={(event) => onSourceChange(event.target.value)}>{environments.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}</select></label>
+      <span>Compare encrypted values without revealing them. Promote one key or the full baseline.</span>
+      <label>Promotion target<select aria-label="Promotion target" value={targetEnvironmentId} onChange={(event) => setTargetEnvironmentId(event.target.value)}>{availableTargets.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}{environment.protected ? " · protected" : ""}</option>)}</select></label>
+      <button type="button" disabled={targetPreview === undefined || targetPreview.summary.selected === 0} onClick={() => onPromote(targetEnvironmentId)}>Review full promotion</button>
+    </div>
     {error ? <p className="health-error" role="alert">{error}</p> : null}
+    {diffError ? <p className="health-warning" role="status">Some value comparisons are unavailable: {diffError}</p> : null}
     {report === null && error === null ? <p className="health-loading">Computing value-safe matrix…</p> : null}
     {report ? <div className="health-matrix" role="table" aria-label="Key by environment consistency matrix">
       <div className="health-matrix-row health-matrix-head" role="row" style={{ gridTemplateColumns: `minmax(190px, 1.4fr) repeat(${report.environments.length}, minmax(130px, 1fr))` }}><span role="columnheader">Key</span>{report.environments.map(({ id, slug }) => <span role="columnheader" key={id}>{environmentById.get(id)?.name ?? slug}</span>)}</div>
-      {report.matrix.map((row) => <div className="health-matrix-row" role="row" key={row.key} style={{ gridTemplateColumns: `minmax(190px, 1.4fr) repeat(${report.environments.length}, minmax(130px, 1fr))` }}><code role="cell">{row.key}</code>{row.cells.map((cell) => <div role="cell" key={cell.environmentId} className={`health-cell ${cell.state}`}><span>{cell.state}</span>{cell.state !== "present" ? <button type="button" onClick={() => onFix(row.key, cell)}>{cell.state === "missing" ? "Add" : "Fix"}</button> : null}</div>)}</div>)}
+      {report.matrix.map((row) => <div className="health-matrix-row" role="row" key={row.key} style={{ gridTemplateColumns: `minmax(190px, 1.4fr) repeat(${report.environments.length}, minmax(130px, 1fr))` }}><code role="cell">{row.key}</code>{row.cells.map((cell) => {
+        const item = previews[cell.environmentId]?.items.find((candidate) => row.keys.includes(candidate.key));
+        const marker = promotionMarker(sourceEnvironmentId, cell, item);
+        const findings = report.findings.filter((finding) => row.keys.includes(finding.key) || finding.keys.some((key) => row.keys.includes(key))).filter((finding) => finding.environmentIds.includes(cell.environmentId) || finding.missingEnvironmentIds.includes(cell.environmentId));
+        return <div role="cell" key={cell.environmentId} className={`health-cell ${cell.state} diff-${marker}`}><span>{cell.state}</span><em>{marker === "source" ? "baseline" : marker === "changed" ? "value changed" : marker === "same" ? "values match" : marker === "target-only" ? "target only" : "needs copy"}</em>{findings.map((finding) => <small key={finding.id} className={finding.severity}>{findingLabel(finding.type)}</small>)}{item !== undefined && cell.environmentId !== sourceEnvironmentId && (item.action === "create" || item.changed || cell.state === "empty") ? <button type="button" onClick={() => onPromote(cell.environmentId, [item.key])}>Promote</button> : cell.state !== "present" && cell.environmentId === sourceEnvironmentId ? <button type="button" onClick={() => onFix(row.key, cell)}>Add</button> : null}</div>;
+      })}</div>)}
     </div> : null}
-    {report ? <footer><span>{report.summary.errors} errors · {report.summary.warnings} warnings</span><span>Values are never included in this report</span></footer> : null}
+    {report ? <footer><span>{report.summary.errors} errors · {report.summary.warnings} warnings</span><span>Presence and change markers only · values never leave the vault</span></footer> : null}
   </section>;
+}
+
+function PromotionDialog({ projectId, environments, request, preview, client, onCancel, onPromoted }: {
+  projectId: string;
+  environments: readonly EnvironmentView[];
+  request: { sourceEnvironmentId: string; targetEnvironmentId: string; keys?: readonly string[] };
+  preview: SecretPromotionPreviewView | null;
+  client: SecretClient;
+  onCancel: () => void;
+  onPromoted: (result: SecretPromotionResultView) => void;
+}): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const items = preview?.items.filter((item) => request.keys === undefined || request.keys.includes(item.key)) ?? [];
+  const summary = { selected: items.length, created: items.filter(({ action }) => action === "create").length, overwritten: items.filter(({ action }) => action === "overwrite").length };
+  const source = environments.find(({ id }) => id === request.sourceEnvironmentId);
+  const target = environments.find(({ id }) => id === request.targetEnvironmentId);
+  const commit = async () => {
+    setBusy(true);
+    setError(null);
+    try { onPromoted(await client.promote(projectId, request.targetEnvironmentId, request.sourceEnvironmentId, request.keys)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Promotion could not be completed."); }
+    finally { setBusy(false); }
+  };
+  return <div className="sheet-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="editor-sheet promotion-sheet" role="dialog" aria-modal="true" aria-label="Review secret promotion"><header><div><span className="kicker">Encrypted promotion</span><h2>{source?.name ?? "Source"} → {target?.name ?? "Target"}</h2><p>Values stay masked and are re-encrypted for the target environment.</p></div><button type="button" aria-label="Close promotion" onClick={onCancel}>×</button></header><div className="import-summary"><strong>{summary.selected}<span>selected</span></strong><strong>{summary.created}<span>creates</span></strong><strong className={summary.overwritten > 0 ? "danger" : ""}>{summary.overwritten}<span>overwrites</span></strong></div>{target?.protected ? <p className="promotion-warning">◆ Protected environment · elevated write permission is required.</p> : null}<div className="promotion-list">{items.map((item) => <div key={item.key}><code>{item.key}</code><span className={item.action}>{item.action}</span><small>{item.action === "overwrite" ? item.changed ? "value differs" : "value matches" : "not present"}</small></div>)}</div>{error ? <p className="import-error" role="alert">{error}</p> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" disabled={busy || items.length === 0} onClick={() => void commit()}>{busy ? "Promoting…" : `Promote ${items.length} key${items.length === 1 ? "" : "s"}`}</button></footer></section></div>;
 }
 
 function SecretEditor({ mode, secret, initialKey, onCancel, onSave }: {

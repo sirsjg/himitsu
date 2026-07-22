@@ -15,6 +15,7 @@ import {
   filterSecretRows,
   isConventionalSecretKey,
   parseBulkSecrets,
+  promotionMarker,
 } from "../src/SecretWorkspace.js";
 import { createAuditClient } from "../src/AuditPage.js";
 
@@ -219,6 +220,36 @@ test("secret client targets v1 routes, sends optimistic version preconditions, a
   ]);
 });
 
+test("promotion markers distinguish baseline, missing, changed, matching, and target-only cells", () => {
+  const present = { environmentId: "target", state: "present" as const };
+  const item = { key: "DATABASE_URL", action: "overwrite" as const, changed: true, sourceVersion: 2, targetVersion: 1 };
+  assert.equal(promotionMarker("source", { environmentId: "source", state: "present" }, item), "source");
+  assert.equal(promotionMarker("source", { environmentId: "target", state: "missing" }), "missing");
+  assert.equal(promotionMarker("source", present, item), "changed");
+  assert.equal(promotionMarker("source", present, { ...item, changed: false }), "same");
+  assert.equal(promotionMarker("source", present), "target-only");
+});
+
+test("promotion client previews and commits selected or full environment copies", async () => {
+  const calls: Array<{ input: string; method?: string; body: unknown }> = [];
+  const preview = {
+    sourceEnvironmentId: "development/id",
+    targetEnvironmentId: "production/id",
+    items: [{ key: "DATABASE_URL", action: "overwrite", changed: true, sourceVersion: 3, targetVersion: 2 }],
+    summary: { selected: 1, created: 0, overwritten: 1 },
+  };
+  const client = createSecretClient(async (input, init) => {
+    calls.push({ input, ...(init?.method === undefined ? {} : { method: init.method }), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ data: input.endsWith("/preview") ? preview : { ...preview, secrets: [] } }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  assert.equal((await client.previewPromotion("project/id", "production/id", "development/id")).items[0]?.changed, true);
+  assert.equal((await client.promote("project/id", "production/id", "development/id", ["DATABASE_URL"])).summary.overwritten, 1);
+  assert.deepEqual(calls, [
+    { input: "/api/v1/projects/project%2Fid/environments/production%2Fid/promotions/preview", method: "POST", body: { sourceEnvironmentId: "development/id" } },
+    { input: "/api/v1/projects/project%2Fid/environments/production%2Fid/promotions", method: "POST", body: { sourceEnvironmentId: "development/id", keys: ["DATABASE_URL"] } },
+  ]);
+});
+
 test("project detail renders environment browsing and masked secret editing controls", () => {
   const html = renderRoute("/app/projects/project-atlas");
 
@@ -229,6 +260,13 @@ test("project detail renders environment browsing and masked secret editing cont
   assert.match(html, /Bulk paste/);
   assert.match(html, /Add secret/);
   assert.match(html, /Project consistency health/);
+  assert.match(html, /Cross-environment diff/);
+  assert.match(html, /Baseline environment/);
+  assert.match(html, /Promotion target/);
+  assert.match(html, /Review full promotion/);
+  assert.match(html, /value changed/);
+  assert.match(html, />Promote</);
+  assert.match(html, /Presence and change markers only/);
   assert.match(html, /Configuration drift/);
   assert.match(html, /CI exit code/);
   assert.match(html, /STRIPE_SECRET_KEY/);
