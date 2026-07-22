@@ -20,6 +20,7 @@
     "@fastify/swagger": "^9.6.1",
     "@himitsu/api-keys": "0.0.0",
     "@himitsu/audit": "0.0.0",
+    "@himitsu/auth": "0.0.0",
     "@himitsu/authz": "0.0.0",
     "@himitsu/crypto": "0.0.0",
     "@himitsu/environments": "0.0.0",

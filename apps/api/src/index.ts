@@ -1,24 +1,41 @@
 import swagger from "@fastify/swagger";
-import { ApiKeyError, type ApiKeyService } from "@himitsu/api-keys";
+import { ApiKeyError, type ApiKeyPrincipal, type ApiKeyService } from "@himitsu/api-keys";
+import type { TransactionalAuditLog } from "@himitsu/audit";
+import { AuthError, sessionCookie, type AuthService } from "@himitsu/auth";
 import { AuthorizationContextResolver, AuthorizationError, requirePermission } from "@himitsu/authz";
 import { EnvironmentError, type EnvironmentService } from "@himitsu/environments";
 import { ProjectError, type ProjectService } from "@himitsu/projects";
 import { SecretError, type SecretService } from "@himitsu/secrets";
 import { TenancyError, type TenantDatabase, type TenantTransaction } from "@himitsu/tenancy";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+
+export type ApiActor =
+  | { readonly type: "user"; readonly userId: string; readonly sessionId: string }
+  | { readonly type: "api_key"; readonly apiKeyId: string; readonly prefix: string };
 
 export interface ApiRequestContext {
   readonly orgId: string;
   readonly userId: string;
+  readonly actor: ApiActor;
+  readonly apiKey: ApiKeyPrincipal | null;
+}
+
+export interface ApiRateLimitOptions {
+  readonly windowMs?: number;
+  readonly perIp?: number;
+  readonly perApiKey?: number;
+  readonly now?: () => number;
 }
 
 export interface ApiDependencies {
   readonly database: TenantDatabase;
+  readonly auth: AuthService;
   readonly apiKeys: ApiKeyService;
+  readonly audit: TransactionalAuditLog;
   readonly projects: ProjectService;
   readonly environments: EnvironmentService;
   readonly secrets: SecretService;
-  readonly resolveRequestContext: (request: FastifyRequest) => Promise<ApiRequestContext> | ApiRequestContext;
+  readonly rateLimits?: ApiRateLimitOptions;
 }
 
 export class ApiError extends Error {
@@ -164,6 +181,161 @@ const createdApiKeySchema = {
 } as const;
 const stringMapSchema = { type: "object", additionalProperties: { type: "string" } } as const;
 
+export interface RateLimitDecision {
+  readonly allowed: boolean;
+  readonly limit: number;
+  readonly remaining: number;
+  readonly resetAfterSeconds: number;
+}
+
+interface RateLimitBucket {
+  count: number;
+  resetAt: number;
+}
+
+export class InMemoryRateLimiter {
+  readonly #windowMs: number;
+  readonly #perIp: number;
+  readonly #perApiKey: number;
+  readonly #now: () => number;
+  readonly #buckets = new Map<string, RateLimitBucket>();
+  #operations = 0;
+
+  constructor(options: ApiRateLimitOptions = {}) {
+    this.#windowMs = positiveInteger(options.windowMs ?? 60_000, "Rate-limit window");
+    this.#perIp = positiveInteger(options.perIp ?? 300, "Per-IP rate limit");
+    this.#perApiKey = positiveInteger(options.perApiKey ?? 120, "Per-key rate limit");
+    this.#now = options.now ?? Date.now;
+  }
+
+  consume(kind: "ip" | "api_key", identity: string): RateLimitDecision {
+    const now = this.#now();
+    const limit = kind === "ip" ? this.#perIp : this.#perApiKey;
+    const bucketKey = `${kind}:${identity}`;
+    const current = this.#buckets.get(bucketKey);
+    const bucket = current === undefined || current.resetAt <= now
+      ? { count: 0, resetAt: now + this.#windowMs }
+      : current;
+    bucket.count += 1;
+    this.#buckets.set(bucketKey, bucket);
+    this.#operations += 1;
+    if (this.#operations % 1000 === 0) {
+      for (const [key, candidate] of this.#buckets) {
+        if (candidate.resetAt <= now) this.#buckets.delete(key);
+      }
+    }
+    return {
+      allowed: bucket.count <= limit,
+      limit,
+      remaining: Math.max(0, limit - bucket.count),
+      resetAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)),
+    };
+  }
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+
+function applyRateLimitHeaders(reply: FastifyReply, decision: RateLimitDecision): void {
+  void reply.header("RateLimit-Limit", decision.limit.toString());
+  void reply.header("RateLimit-Remaining", decision.remaining.toString());
+  void reply.header("RateLimit-Reset", decision.resetAfterSeconds.toString());
+  void reply.header("RateLimit-Policy", `${decision.limit};w=${decision.resetAfterSeconds}`);
+  if (!decision.allowed) {
+    void reply.header("Retry-After", decision.resetAfterSeconds.toString());
+    throw new ApiError(429, "RATE_LIMITED", "Too many requests");
+  }
+}
+
+function cookieValue(header: string | undefined, name: string): string | null {
+  if (header === undefined) return null;
+  for (const pair of header.split(";")) {
+    const separator = pair.indexOf("=");
+    if (separator < 0 || pair.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(pair.slice(separator + 1).trim());
+    } catch {
+      throw new ApiError(401, "UNAUTHENTICATED", "Session cookie is invalid");
+    }
+  }
+  return null;
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function clientDetails(request: FastifyRequest): { ip: string; userAgent?: string } {
+  const userAgent = headerValue(request.headers["user-agent"]);
+  return { ip: request.ip, ...(userAgent === undefined ? {} : { userAgent }) };
+}
+
+function isUnsafeMethod(method: string): boolean {
+  return !(["GET", "HEAD", "OPTIONS"] as const).includes(method as "GET" | "HEAD" | "OPTIONS");
+}
+
+async function authenticateRequest(
+  dependencies: ApiDependencies,
+  request: FastifyRequest,
+): Promise<ApiRequestContext> {
+  const authorization = headerValue(request.headers.authorization);
+  const sessionToken = cookieValue(request.headers.cookie, sessionCookie.name);
+  if (authorization !== undefined && sessionToken !== null) {
+    throw new ApiError(401, "UNAUTHENTICATED", "Use either a session or bearer credential, not both");
+  }
+  if (authorization !== undefined) {
+    const bearer = /^Bearer ([^\s]+)$/i.exec(authorization)?.[1];
+    if (bearer === undefined) throw new ApiError(401, "UNAUTHENTICATED", "Bearer API token is required");
+    const principal = await dependencies.apiKeys.authenticate(bearer, clientDetails(request));
+    return {
+      orgId: principal.orgId,
+      userId: principal.userId,
+      actor: { type: "api_key", apiKeyId: principal.apiKeyId, prefix: principal.prefix },
+      apiKey: principal,
+    };
+  }
+  if (sessionToken === null) throw new ApiError(401, "UNAUTHENTICATED", "Authentication is required");
+  try {
+    const session = await dependencies.auth.authenticate(sessionToken);
+    if (session.activeOrgId === null) {
+      throw new AuthError("INVALID_SESSION", "Select an active organization");
+    }
+    if (isUnsafeMethod(request.method)) {
+      const csrf = headerValue(request.headers["x-csrf-token"]);
+      if (csrf === undefined) throw new AuthError("INVALID_CSRF", "CSRF token is required");
+      dependencies.auth.verifyCsrf(session, csrf);
+    }
+    return {
+      orgId: session.activeOrgId,
+      userId: session.userId,
+      actor: { type: "user", userId: session.userId, sessionId: session.sessionId },
+      apiKey: null,
+    };
+  } catch (error) {
+    if (error instanceof AuthError) {
+      const failed = await dependencies.auth.failedSessionContext(sessionToken);
+      if (failed !== null) {
+        try {
+          await dependencies.database.withOrg(failed.activeOrgId, failed.userId, (transaction) =>
+            dependencies.audit.recordInTransaction(transaction, {
+              orgId: failed.activeOrgId,
+              actor: { type: "user", id: failed.userId },
+              action: "auth.login_failed",
+              resource: { type: "session", id: failed.sessionId },
+              ...clientDetails(request),
+              details: { method: "session", reason: error.code },
+            }));
+        } catch {
+          // A removed membership cannot write a tenant audit row; authentication still fails closed.
+        }
+      }
+    }
+    throw error;
+  }
+}
+
 function responseEnvelope(data: unknown, paged = false): Record<string, unknown> {
   return {
     type: "object", additionalProperties: false, required: ["data"],
@@ -189,6 +361,8 @@ function listSchema(item: unknown): Record<string, unknown> {
 
 export async function buildApi(dependencies: ApiDependencies): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, ajv: { customOptions: { coerceTypes: true } } });
+  const contexts = new WeakMap<FastifyRequest, ApiRequestContext>();
+  const rateLimiter = new InMemoryRateLimiter(dependencies.rateLimits);
   await app.register(swagger, {
     openapi: {
       openapi: "3.1.0",
@@ -220,17 +394,26 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     });
   });
 
+  app.addHook("onRequest", async (request, reply) => {
+    if (routePath(request) === "/api/v1/openapi.json") return;
+    applyRateLimitHeaders(reply, rateLimiter.consume("ip", request.ip));
+    const context = await authenticateRequest(dependencies, request);
+    if (context.apiKey !== null) {
+      applyRateLimitHeaders(reply, rateLimiter.consume("api_key", context.apiKey.apiKeyId));
+    }
+    contexts.set(request, context);
+  });
+
   const withTenant = async <T>(
     request: FastifyRequest,
     work: (transaction: TenantTransaction, context: ApiRequestContext) => Promise<T>,
   ): Promise<T> => {
-    const context = await dependencies.resolveRequestContext(request);
-    if (!context.orgId || !context.userId) {
-      throw new ApiError(401, "UNAUTHENTICATED", "An authenticated organization context is required");
-    }
-    return dependencies.database.withOrg(context.orgId, context.userId, (transaction) =>
-      work(transaction, context),
-    );
+    const context = contexts.get(request);
+    if (context === undefined) throw new ApiError(401, "UNAUTHENTICATED", "Authentication is required");
+    return dependencies.database.withOrg(context.orgId, context.userId, async (transaction) => {
+      await enforceApiKeyScope(request, transaction, context);
+      return work(transaction, context);
+    });
   };
 
   app.get("/api/v1/openapi.json", {
@@ -245,7 +428,10 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     schema: { operationId: "listProjects", tags: ["projects"], querystring: pageQuery, response: apiResponses(listSchema(projectSchema), true) },
   }, async (request) => withTenant(request, async (transaction, context) => {
     const all = await dependencies.projects.list(transaction, context.userId);
-    return paginated(all, request.query as PageQuery);
+    const visible = context.apiKey?.projectId === null || context.apiKey === null
+      ? all
+      : all.filter(({ id }) => id === context.apiKey?.projectId);
+    return paginated(visible, request.query as PageQuery);
   }));
 
   app.post("/api/v1/projects", {
@@ -334,7 +520,10 @@ function registerEnvironmentRoutes(
     schema: { operationId: "listEnvironments", tags: ["environments"], params: idParams({ projectId: uuid }), querystring: pageQuery, response: apiResponses(listSchema(environmentSchema), true) },
   }, async (request) => withTenant(request, async (transaction, context) => {
     const all = await dependencies.environments.list(transaction, context.userId, params(request).projectId ?? "");
-    return paginated(all, request.query as PageQuery);
+    const visible = context.apiKey?.environmentId === null || context.apiKey === null
+      ? all
+      : all.filter(({ id }) => id === context.apiKey?.environmentId);
+    return paginated(visible, request.query as PageQuery);
   }));
   app.post("/api/v1/projects/:projectId/environments", {
     schema: {
@@ -638,6 +827,70 @@ function params(request: FastifyRequest): IdParams {
   return request.params as IdParams;
 }
 
+function isReadOperation(request: FastifyRequest): boolean {
+  return request.method === "GET"
+    || request.method === "HEAD"
+    || routePath(request).endsWith("/secrets/bulk-get");
+}
+
+function routePath(request: FastifyRequest): string {
+  return request.routeOptions.url ?? request.url.split("?", 1)[0] ?? "";
+}
+
+async function enforceApiKeyScope(
+  request: FastifyRequest,
+  transaction: TenantTransaction,
+  context: ApiRequestContext,
+): Promise<void> {
+  const principal = context.apiKey;
+  if (principal === null) return;
+  if (principal.access === "read_only" && !isReadOperation(request)) {
+    throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key does not permit writes");
+  }
+  if (principal.projectId === null) return;
+  const route = routePath(request);
+  if (route.startsWith("/api/v1/tags") || route.startsWith("/api/v1/api-keys")) {
+    throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key scope does not include organization resources");
+  }
+  const requestParams = params(request);
+  if (requestParams.projectId !== undefined && requestParams.projectId !== principal.projectId) {
+    throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key project scope does not match this request");
+  }
+  if (
+    principal.environmentId !== null
+    && requestParams.environmentId !== undefined
+    && requestParams.environmentId !== principal.environmentId
+  ) {
+    throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key environment scope does not match this request");
+  }
+  if (requestParams.secretId !== undefined) {
+    const secret = await transaction.query<{ project_id: string; environment_id: string }>(
+      "SELECT project_id, environment_id FROM secrets WHERE id = $1 AND deleted_at IS NULL",
+      [requestParams.secretId],
+    );
+    const scope = secret.rows[0];
+    if (
+      scope !== undefined
+      && (scope.project_id !== principal.projectId
+        || (principal.environmentId !== null && scope.environment_id !== principal.environmentId))
+    ) {
+      throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key scope does not include this secret");
+    }
+    return;
+  }
+  if (route === "/api/v1/projects" && request.method === "GET") return;
+  if (requestParams.projectId === undefined) {
+    throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key scope does not include this resource");
+  }
+  if (
+    principal.environmentId !== null
+    && requestParams.environmentId === undefined
+    && isUnsafeMethod(request.method)
+  ) {
+    throw new ApiError(403, "API_SCOPE_FORBIDDEN", "Environment-scoped API keys cannot modify project-wide resources");
+  }
+}
+
 function pagination(query: PageQuery): { limit: number; offset: number } {
   return { limit: query.limit ?? 50, offset: query.offset ?? 0 };
 }
@@ -667,6 +920,10 @@ function mapError(error: unknown): ApiError {
     return new ApiError(400, "INVALID_REQUEST", "Request validation failed", { validation });
   }
   if (error instanceof AuthorizationError) return new ApiError(403, "FORBIDDEN", "Permission denied");
+  if (error instanceof AuthError) {
+    if (error.code === "INVALID_CSRF") return new ApiError(403, "INVALID_CSRF", "CSRF validation failed");
+    return new ApiError(401, "UNAUTHENTICATED", "Session is invalid or expired");
+  }
   if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError) {
     if (error.code === "NOT_FOUND") return new ApiError(404, "NOT_FOUND", error.message);
     if (error.code.endsWith("EXISTS")) return new ApiError(409, error.code, error.message);

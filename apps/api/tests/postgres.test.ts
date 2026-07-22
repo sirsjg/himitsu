@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { TransactionalAuditLog } from "@himitsu/audit";
 import { ApiKeyService } from "@himitsu/api-keys";
+import { AuthService, sessionCookie } from "@himitsu/auth";
 import { AuthorizationContextResolver } from "@himitsu/authz";
 import { LocalMasterKey } from "@himitsu/crypto";
 import { EnvironmentService } from "@himitsu/environments";
@@ -22,12 +23,22 @@ const adminPool = new Pool({ connectionString: adminConnectionString, max: 2 });
 const appPool = new Pool({ connectionString: appConnectionString, max: 10 });
 const database = new TenantDatabase(appPool);
 const audit = new TransactionalAuditLog(appPool);
+const auth = new AuthService(appPool, {
+  async sendEmailVerification() {},
+  async sendPasswordReset() {},
+});
 const resolver = new AuthorizationContextResolver();
 const ownerA = randomUUID();
 const memberA = randomUUID();
 const ownerB = randomUUID();
 const orgA = randomUUID();
 const orgB = randomUUID();
+const sessionTokens = new Map<string, { session: string; csrf: string }>([
+  [ownerA, { session: `session-${randomUUID()}`, csrf: `csrf-${randomUUID()}` }],
+  [memberA, { session: `session-${randomUUID()}`, csrf: `csrf-${randomUUID()}` }],
+  [ownerB, { session: `session-${randomUUID()}`, csrf: `csrf-${randomUUID()}` }],
+]);
+const revokedSessionToken = `session-${randomUUID()}`;
 const projects = new ProjectService(resolver, audit);
 const apiKeys = new ApiKeyService(appPool, resolver, audit);
 const environments = new EnvironmentService(resolver, audit);
@@ -38,20 +49,25 @@ const secrets = new SecretService(
 );
 const app = await buildApi({
   database,
+  auth,
   apiKeys,
+  audit,
   projects,
   environments,
   secrets,
-  resolveRequestContext: (request) => ({
-    orgId: typeof request.headers["x-test-org-id"] === "string" ? request.headers["x-test-org-id"] : "",
-    userId: typeof request.headers["x-test-user-id"] === "string" ? request.headers["x-test-user-id"] : "",
-  }),
+  rateLimits: { perIp: 1_000, perApiKey: 100 },
 });
 
-const headers = (orgId: string, userId: string) => ({
-  "x-test-org-id": orgId,
-  "x-test-user-id": userId,
-});
+const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
+
+const headers = (_orgId: string, userId: string) => {
+  const credentials = sessionTokens.get(userId);
+  assert.ok(credentials);
+  return {
+    cookie: `${sessionCookie.name}=${encodeURIComponent(credentials.session)}`,
+    "x-csrf-token": credentials.csrf,
+  };
+};
 
 before(async () => {
   await adminPool.query(
@@ -68,6 +84,20 @@ before(async () => {
     `INSERT INTO memberships (org_id, user_id, role) VALUES
       ($1, $2, 'owner'), ($1, $3, 'member'), ($4, $5, 'owner')`,
     [orgA, ownerA, memberA, orgB, ownerB],
+  );
+  for (const [userId, orgId] of [[ownerA, orgA], [memberA, orgA], [ownerB, orgB]] as const) {
+    const credentials = sessionTokens.get(userId);
+    assert.ok(credentials);
+    await adminPool.query(
+      `INSERT INTO sessions (user_id, token_hash, csrf_hash, active_org_id, expires_at)
+       VALUES ($1, $2, $3, $4, now() + interval '1 day')`,
+      [userId, digest(credentials.session), digest(credentials.csrf), orgId],
+    );
+  }
+  await adminPool.query(
+    `INSERT INTO sessions (user_id, token_hash, csrf_hash, active_org_id, expires_at, revoked_at)
+     VALUES ($1, $2, $3, $4, now() + interval '1 day', now())`,
+    [ownerA, digest(revokedSessionToken), digest("revoked-csrf"), orgA],
   );
 });
 
@@ -112,6 +142,7 @@ test("returns stable validation and authentication error envelopes", async () =>
   assert.equal(unauthenticated.statusCode, 401);
   assert.deepEqual(Object.keys(unauthenticated.json().error).sort(), ["code", "message", "requestId"]);
   assert.equal(unauthenticated.json().error.code, "UNAUTHENTICATED");
+  assert.equal(unauthenticated.headers["ratelimit-limit"], "1000");
 
   const invalid = await app.inject({
     method: "POST",
@@ -122,6 +153,42 @@ test("returns stable validation and authentication error envelopes", async () =>
   assert.equal(invalid.statusCode, 400);
   assert.equal(invalid.json().error.code, "INVALID_REQUEST");
   assert.ok(invalid.json().error.requestId);
+});
+
+test("enforces session CSRF and audits attributable failed authentication", async () => {
+  const credentials = sessionTokens.get(ownerA);
+  assert.ok(credentials);
+  const missingCsrf = await app.inject({
+    method: "POST",
+    url: "/api/v1/projects",
+    headers: { cookie: `${sessionCookie.name}=${encodeURIComponent(credentials.session)}` },
+    payload: { name: "Denied", slug: "denied" },
+  });
+  assert.equal(missingCsrf.statusCode, 403);
+  assert.equal(missingCsrf.json().error.code, "INVALID_CSRF");
+
+  const revoked = await app.inject({
+    method: "GET",
+    url: "/api/v1/projects",
+    headers: { cookie: `${sessionCookie.name}=${encodeURIComponent(revokedSessionToken)}` },
+  });
+  assert.equal(revoked.statusCode, 401);
+  const failures = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{
+    actor_type: string;
+    resource_type: string;
+    metadata: { details?: { method?: string; reason?: string } };
+  }>(
+    `SELECT actor_type, resource_type, metadata FROM audit_events
+     WHERE action = 'auth.login_failed' ORDER BY id`,
+  ));
+  assert.deepEqual(failures.rows.map(({ actor_type, resource_type }) => ({ actor_type, resource_type })), [
+    { actor_type: "user", resource_type: "session" },
+    { actor_type: "user", resource_type: "session" },
+  ]);
+  assert.deepEqual(failures.rows.map(({ metadata }) => metadata.details), [
+    { method: "session", reason: "INVALID_CSRF" },
+    { method: "session", reason: "INVALID_SESSION" },
+  ]);
 });
 
 let projectId: string;
@@ -303,11 +370,116 @@ test("manages scoped API keys while revealing token material only at creation", 
   });
   assert.equal(denied.statusCode, 403);
 
+  const token = created.json().data.token as string;
+  const machineRead = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(machineRead.statusCode, 200, machineRead.body);
+  assert.equal(machineRead.headers["ratelimit-limit"], "100");
+  assert.ok(Number(machineRead.headers["ratelimit-remaining"]) < 100);
+
+  const machineWrite = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: { key: "MACHINE_WRITE", value: "allowed" },
+  });
+  assert.equal(machineWrite.statusCode, 201, machineWrite.body);
+
+  const wrongEnvironment = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/secrets`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: { key: "OUT_OF_SCOPE", value: "denied" },
+  });
+  assert.equal(wrongEnvironment.statusCode, 403);
+  assert.equal(wrongEnvironment.json().error.code, "API_SCOPE_FORBIDDEN");
+
+  const scopedProjects = await app.inject({
+    method: "GET", url: "/api/v1/projects", headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(scopedProjects.statusCode, 200, scopedProjects.body);
+  assert.deepEqual(scopedProjects.json().data.map(({ id }: { id: string }) => id), [projectId]);
+  const scopedTags = await app.inject({
+    method: "GET", url: "/api/v1/tags", headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(scopedTags.statusCode, 403);
+
+  const readOnlyCreated = await app.inject({
+    method: "POST", url: "/api/v1/api-keys", headers: headers(orgA, ownerA),
+    payload: { name: "Read-only runtime", access: "read_only", projectId, environmentId: developmentId },
+  });
+  assert.equal(readOnlyCreated.statusCode, 201, readOnlyCreated.body);
+  const readOnlyToken = readOnlyCreated.json().data.token as string;
+  const readOnlyGet = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: { authorization: `Bearer ${readOnlyToken}` },
+  });
+  assert.equal(readOnlyGet.statusCode, 200, readOnlyGet.body);
+  const readOnlyWrite = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: { authorization: `Bearer ${readOnlyToken}` },
+    payload: { key: "READ_ONLY_DENIED", value: "denied" },
+  });
+  assert.equal(readOnlyWrite.statusCode, 403);
+  assert.equal(readOnlyWrite.json().error.code, "API_SCOPE_FORBIDDEN");
+
+  const ambiguous = await app.inject({
+    method: "GET",
+    url: "/api/v1/projects",
+    headers: { ...headers(orgA, ownerA), authorization: `Bearer ${token}` },
+  });
+  assert.equal(ambiguous.statusCode, 401);
+
+  const invalidToken = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
+  const invalid = await app.inject({
+    method: "GET", url: "/api/v1/projects", headers: { authorization: `Bearer ${invalidToken}` },
+  });
+  assert.equal(invalid.statusCode, 401);
+  const apiKeyFailures = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{
+    actor_type: string;
+    actor_api_key_id: string;
+    metadata: { details?: { method?: string; reason?: string } };
+  }>(
+    `SELECT actor_type, actor_api_key_id, metadata FROM audit_events
+     WHERE action = 'auth.login_failed' AND actor_type = 'api_key' ORDER BY id`,
+  ));
+  assert.equal(apiKeyFailures.rows.at(-1)?.actor_api_key_id, apiKeyId);
+  assert.deepEqual(apiKeyFailures.rows.at(-1)?.metadata.details, {
+    method: "bearer", reason: "invalid_or_inactive",
+  });
+
+  const limitedApp = await buildApi({
+    database, auth, apiKeys, audit, projects, environments, secrets,
+    rateLimits: { perIp: 100, perApiKey: 1 },
+  });
+  const firstLimited = await limitedApp.inject({
+    method: "GET", url: `/api/v1/projects/${projectId}`, headers: { authorization: `Bearer ${token}` },
+  });
+  const secondLimited = await limitedApp.inject({
+    method: "GET", url: `/api/v1/projects/${projectId}`, headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(firstLimited.statusCode, 200, firstLimited.body);
+  assert.equal(firstLimited.headers["ratelimit-remaining"], "0");
+  assert.equal(secondLimited.statusCode, 429, secondLimited.body);
+  assert.equal(secondLimited.headers["retry-after"], "60");
+  await limitedApp.close();
+
   const revoked = await app.inject({
     method: "DELETE", url: `/api/v1/api-keys/${apiKeyId}`, headers: headers(orgA, ownerA),
   });
   assert.equal(revoked.statusCode, 200, revoked.body);
   assert.ok(revoked.json().data.revokedAt);
+  const readOnlyRevoked = await app.inject({
+    method: "DELETE",
+    url: `/api/v1/api-keys/${readOnlyCreated.json().data.apiKey.id}`,
+    headers: headers(orgA, ownerA),
+  });
+  assert.equal(readOnlyRevoked.statusCode, 200, readOnlyRevoked.body);
 });
 
 test("deletes tags and projects through their v1 lifecycle endpoints", async () => {

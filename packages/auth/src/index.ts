@@ -44,8 +44,15 @@ export interface AuthenticatedSession {
   readonly sessionId: string;
   readonly userId: string;
   readonly email: string;
+  readonly activeOrgId: string | null;
   readonly csrfHash: Buffer;
   readonly expiresAt: Date;
+}
+
+export interface FailedSessionContext {
+  readonly sessionId: string;
+  readonly userId: string;
+  readonly activeOrgId: string;
 }
 
 export const sessionCookie = {
@@ -132,7 +139,14 @@ export class PasswordHasher {
 }
 
 interface UserRow { id: string; email: string; password_hash: string; email_verified_at: Date | null }
-interface SessionRow { id: string; user_id: string; email: string; csrf_hash: Buffer; expires_at: Date }
+interface SessionRow {
+  id: string;
+  user_id: string;
+  email: string;
+  active_org_id: string | null;
+  csrf_hash: Buffer;
+  expires_at: Date;
+}
 
 export class AuthService {
   readonly #pool: Pool;
@@ -210,7 +224,7 @@ export class AuthService {
 
   async authenticate(sessionToken: string): Promise<AuthenticatedSession> {
     const result = await this.#pool.query<SessionRow>(
-      `SELECT s.id, s.user_id, u.email, s.csrf_hash, s.expires_at
+      `SELECT s.id, s.user_id, u.email, s.active_org_id, s.csrf_hash, s.expires_at
        FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.disabled_at IS NULL`,
       [digest(sessionToken)],
@@ -222,9 +236,27 @@ export class AuthService {
       sessionId: session.id,
       userId: session.user_id,
       email: session.email,
+      activeOrgId: session.active_org_id,
       csrfHash: session.csrf_hash,
       expiresAt: session.expires_at,
     };
+  }
+
+  async failedSessionContext(sessionToken: string): Promise<FailedSessionContext | null> {
+    const result = await this.#pool.query<{
+      id: string;
+      user_id: string;
+      active_org_id: string;
+    }>(
+      `SELECT id, user_id, active_org_id
+       FROM sessions
+       WHERE token_hash = $1 AND active_org_id IS NOT NULL`,
+      [digest(sessionToken)],
+    );
+    const session = result.rows[0];
+    return session === undefined
+      ? null
+      : { sessionId: session.id, userId: session.user_id, activeOrgId: session.active_org_id };
   }
 
   verifyCsrf(session: AuthenticatedSession, csrfToken: string): void {

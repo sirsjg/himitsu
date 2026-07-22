@@ -10,13 +10,13 @@ database_dir="$repo_dir/packages/database"
 
 cleanup() {
   psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DROP OWNED BY himitsu_app; DROP ROLE IF EXISTS himitsu_app"
-  for migration in 0010_api_keys.down.sql 0009_secrets.down.sql 0008_environments.down.sql 0007_projects.down.sql 0006_rbac.down.sql 0005_tenancy.down.sql 0004_auth.down.sql 0003_audit_append_only.down.sql 0002_org_encryption_keys.down.sql 0001_core.down.sql; do
+  for migration in 0012_api_auth.down.sql 0011_consistency.down.sql 0010_api_keys.down.sql 0009_secrets.down.sql 0008_environments.down.sql 0007_projects.down.sql 0006_rbac.down.sql 0005_tenancy.down.sql 0004_auth.down.sql 0003_audit_append_only.down.sql 0002_org_encryption_keys.down.sql 0001_core.down.sql; do
     psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$database_dir/migrations/$migration"
   done
 }
 trap cleanup EXIT
 
-for migration in 0001_core.sql 0002_org_encryption_keys.sql 0003_audit_append_only.sql 0004_auth.sql 0005_tenancy.sql 0006_rbac.sql 0007_projects.sql 0008_environments.sql 0009_secrets.sql 0010_api_keys.sql; do
+for migration in 0001_core.sql 0002_org_encryption_keys.sql 0003_audit_append_only.sql 0004_auth.sql 0005_tenancy.sql 0006_rbac.sql 0007_projects.sql 0008_environments.sql 0009_secrets.sql 0010_api_keys.sql 0011_consistency.sql 0012_api_auth.sql; do
   psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$database_dir/migrations/$migration"
 done
 
@@ -36,4 +36,4 @@ cleanup
 remaining_relations="$(psql "$TEST_DATABASE_URL" -Atqc \
   "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'S')")"
 [[ "$remaining_relations" = "0" ]]
-echo "REST v1 CRUD, bulk reads, versions, tags, pagination, errors, OpenAPI, RLS, and rollback validated"
+echo "session and API-key auth, scope, rate limits, audit, REST v1, RLS, and rollback validated"

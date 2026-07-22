@@ -38,6 +38,7 @@ export interface CreatedApiKey {
 export interface ApiKeyPrincipal {
   readonly apiKeyId: string;
   readonly orgId: string;
+  readonly userId: string;
   readonly projectId: string | null;
   readonly environmentId: string | null;
   readonly access: ApiKeyAccess;
@@ -64,9 +65,17 @@ interface ConsumedApiKeyRow {
   org_id: string;
   project_id: string | null;
   environment_id: string | null;
+  created_by_user_id: string;
   prefix: string;
   access: ApiKeyAccess;
   last_used_at: Date;
+}
+
+interface ApiKeyIdentityRow {
+  id: string;
+  org_id: string;
+  project_id: string | null;
+  environment_id: string | null;
 }
 
 interface AuditRecorder {
@@ -254,15 +263,41 @@ export class ApiKeyService {
     const prefix = tokenPrefix(token);
     const digest = tokenDigest(token);
     const client = await this.#pool.connect();
+    let transactionFinished = false;
     try {
       await client.query("BEGIN");
       const consumed = await client.query<ConsumedApiKeyRow>(
-        `SELECT id, org_id, project_id, environment_id, prefix, access, last_used_at
+        `SELECT id, org_id, project_id, environment_id, created_by_user_id,
+                prefix, access, last_used_at
          FROM consume_api_key($1, $2)`,
         [prefix, digest],
       );
       const row = consumed.rows[0];
-      if (row === undefined) throw new ApiKeyError("INVALID_TOKEN", "API token is invalid");
+      if (row === undefined) {
+        const identity = await client.query<ApiKeyIdentityRow>(
+          `SELECT id, org_id, project_id, environment_id
+           FROM resolve_api_key_identity($1)`,
+          [prefix],
+        );
+        const identifiable = identity.rows[0];
+        if (identifiable !== undefined) {
+          await client.query("SELECT set_config('app.current_org_id', $1, true)", [identifiable.org_id]);
+          await this.#audit.recordInTransaction(client, {
+            orgId: identifiable.org_id,
+            actor: { type: "api_key", id: identifiable.id },
+            action: "auth.login_failed",
+            resource: { type: "api_key", id: identifiable.id },
+            ...(identifiable.project_id === null ? {} : { projectId: identifiable.project_id }),
+            ...(identifiable.environment_id === null ? {} : { environmentId: identifiable.environment_id }),
+            ...(request.ip === undefined ? {} : { ip: request.ip }),
+            ...(request.userAgent === undefined ? {} : { userAgent: request.userAgent }),
+            details: { method: "bearer", reason: "invalid_or_inactive" },
+          });
+          await client.query("COMMIT");
+          transactionFinished = true;
+        }
+        throw new ApiKeyError("INVALID_TOKEN", "API token is invalid");
+      }
       await client.query("SELECT set_config('app.current_org_id', $1, true)", [row.org_id]);
       await this.#audit.recordInTransaction(client, {
         orgId: row.org_id,
@@ -276,9 +311,11 @@ export class ApiKeyService {
         details: { access: row.access },
       });
       await client.query("COMMIT");
+      transactionFinished = true;
       return {
         apiKeyId: row.id,
         orgId: row.org_id,
+        userId: row.created_by_user_id,
         projectId: row.project_id,
         environmentId: row.environment_id,
         access: row.access,
@@ -286,7 +323,7 @@ export class ApiKeyService {
         usedAt: row.last_used_at,
       };
     } catch (error) {
-      await client.query("ROLLBACK");
+      if (!transactionFinished) await client.query("ROLLBACK");
       if (error instanceof ApiKeyError) throw error;
       throw new ApiKeyError("INVALID_TOKEN", "API token is invalid");
     } finally {
