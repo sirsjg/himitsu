@@ -4,8 +4,8 @@ set -euo pipefail
 : "${TEST_DATABASE_URL:?Set TEST_DATABASE_URL to a fresh disposable database}"
 : "${TEST_APP_DATABASE_URL:?Set TEST_APP_DATABASE_URL to the non-bypass app role URL}"
 
-api_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-repo_dir="$(cd "$api_dir/../.." && pwd)"
+api_keys_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_dir="$(cd "$api_keys_dir/../.." && pwd)"
 database_dir="$repo_dir/packages/database"
 
 cleanup() {
@@ -29,11 +29,11 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO himitsu_app;
 SQL
 
 TEST_DATABASE_URL="$TEST_DATABASE_URL" TEST_APP_DATABASE_URL="$TEST_APP_DATABASE_URL" \
-  npm run test:integration --workspace @himitsu/api
+  npm run test:integration --workspace @himitsu/api-keys
 
 trap - EXIT
 cleanup
 remaining_relations="$(psql "$TEST_DATABASE_URL" -Atqc \
   "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'S')")"
 [[ "$remaining_relations" = "0" ]]
-echo "REST v1 CRUD, bulk reads, versions, tags, pagination, errors, OpenAPI, RLS, and rollback validated"
+echo "API key scopes, one-time reveal, hash-only storage, authentication, expiry, revocation, audit, RLS, and rollback validated"

@@ -1,4 +1,5 @@
 import swagger from "@fastify/swagger";
+import { ApiKeyError, type ApiKeyService } from "@himitsu/api-keys";
 import { AuthorizationContextResolver, AuthorizationError, requirePermission } from "@himitsu/authz";
 import { EnvironmentError, type EnvironmentService } from "@himitsu/environments";
 import { ProjectError, type ProjectService } from "@himitsu/projects";
@@ -13,6 +14,7 @@ export interface ApiRequestContext {
 
 export interface ApiDependencies {
   readonly database: TenantDatabase;
+  readonly apiKeys: ApiKeyService;
   readonly projects: ProjectService;
   readonly environments: EnvironmentService;
   readonly secrets: SecretService;
@@ -39,6 +41,7 @@ export class ApiError extends Error {
 }
 
 interface IdParams {
+  apiKeyId?: string;
   projectId?: string;
   environmentId?: string;
   secretId?: string;
@@ -144,6 +147,21 @@ const tagSchema = {
   required: ["id", "name", "color", "createdAt", "updatedAt"],
   properties: { id: uuid, name: { type: "string" }, color: { type: "string" }, createdAt: dateTime, updatedAt: dateTime },
 } as const;
+const nullableUuid = { anyOf: [uuid, { type: "null" }] } as const;
+const apiKeySchema = {
+  type: "object", additionalProperties: false,
+  required: ["id", "orgId", "projectId", "environmentId", "name", "prefix", "access", "createdAt", "expiresAt", "lastUsedAt", "revokedAt"],
+  properties: {
+    id: uuid, orgId: uuid, projectId: nullableUuid, environmentId: nullableUuid,
+    name: { type: "string" }, prefix: { type: "string", pattern: "^himi_[0-9a-f]{16}$" },
+    access: { type: "string", enum: ["read_only", "read_write"] }, createdAt: dateTime,
+    expiresAt: nullableDateTime, lastUsedAt: nullableDateTime, revokedAt: nullableDateTime,
+  },
+} as const;
+const createdApiKeySchema = {
+  type: "object", additionalProperties: false, required: ["apiKey", "token"],
+  properties: { apiKey: apiKeySchema, token: { type: "string", pattern: "^himi_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$" } },
+} as const;
 const stringMapSchema = { type: "object", additionalProperties: { type: "string" } } as const;
 
 function responseEnvelope(data: unknown, paged = false): Record<string, unknown> {
@@ -185,6 +203,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         { name: "secrets" },
         { name: "versions" },
         { name: "tags" },
+        { name: "api-keys" },
       ],
     },
   });
@@ -294,6 +313,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
   registerEnvironmentRoutes(app, dependencies, withTenant);
   registerSecretRoutes(app, dependencies, withTenant);
   registerTagRoutes(app, withTenant);
+  registerApiKeyRoutes(app, dependencies, withTenant);
 
   await app.ready();
   return app;
@@ -554,6 +574,66 @@ function registerTagRoutes(app: FastifyInstance, withTenant: WithTenant): void {
   }));
 }
 
+function registerApiKeyRoutes(
+  app: FastifyInstance,
+  dependencies: ApiDependencies,
+  withTenant: WithTenant,
+): void {
+  app.get("/api/v1/api-keys", {
+    schema: { operationId: "listApiKeys", tags: ["api-keys"], querystring: pageQuery, response: apiResponses(listSchema(apiKeySchema), true) },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const all = await dependencies.apiKeys.list(transaction, context.userId);
+    return paginated(all, request.query as PageQuery);
+  }));
+  app.post("/api/v1/api-keys", {
+    schema: {
+      operationId: "createApiKey", tags: ["api-keys"],
+      body: {
+        type: "object", additionalProperties: false, required: ["name", "access"],
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 120 },
+          access: { type: "string", enum: ["read_only", "read_write"] },
+          projectId: nullableUuid, environmentId: nullableUuid,
+          expiresAt: { type: ["string", "null"], format: "date-time" },
+        },
+      },
+      response: apiResponses(createdApiKeySchema),
+    },
+  }, async (request, reply) => {
+    const body = request.body as {
+      name: string;
+      access: "read_only" | "read_write";
+      projectId?: string | null;
+      environmentId?: string | null;
+      expiresAt?: string | null;
+    };
+    const created = await withTenant(request, (transaction, context) => dependencies.apiKeys.create(
+      transaction,
+      context.userId,
+      {
+        name: body.name,
+        access: body.access,
+        ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+        ...(body.environmentId === undefined ? {} : { environmentId: body.environmentId }),
+        ...(body.expiresAt === undefined
+          ? {}
+          : { expiresAt: body.expiresAt === null ? null : new Date(body.expiresAt) }),
+      },
+    ));
+    return reply.status(201).send({ data: created });
+  });
+  app.delete("/api/v1/api-keys/:apiKeyId", {
+    schema: {
+      operationId: "revokeApiKey", tags: ["api-keys"], params: idParams({ apiKeyId: uuid }),
+      response: apiResponses(apiKeySchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => ({ data: await dependencies.apiKeys.revoke(
+    transaction,
+    context.userId,
+    params(request).apiKeyId ?? "",
+  ) })));
+}
+
 function params(request: FastifyRequest): IdParams {
   return request.params as IdParams;
 }
@@ -590,6 +670,11 @@ function mapError(error: unknown): ApiError {
   if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError) {
     if (error.code === "NOT_FOUND") return new ApiError(404, "NOT_FOUND", error.message);
     if (error.code.endsWith("EXISTS")) return new ApiError(409, error.code, error.message);
+    return new ApiError(400, error.code, error.message);
+  }
+  if (error instanceof ApiKeyError) {
+    if (error.code === "NOT_FOUND") return new ApiError(404, "NOT_FOUND", error.message);
+    if (error.code === "INVALID_TOKEN") return new ApiError(401, "UNAUTHENTICATED", "API token is invalid");
     return new ApiError(400, error.code, error.message);
   }
   if (error instanceof TenancyError) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { TransactionalAuditLog } from "@himitsu/audit";
+import { ApiKeyService } from "@himitsu/api-keys";
 import { AuthorizationContextResolver } from "@himitsu/authz";
 import { LocalMasterKey } from "@himitsu/crypto";
 import { EnvironmentService } from "@himitsu/environments";
@@ -28,6 +29,7 @@ const ownerB = randomUUID();
 const orgA = randomUUID();
 const orgB = randomUUID();
 const projects = new ProjectService(resolver, audit);
+const apiKeys = new ApiKeyService(appPool, resolver, audit);
 const environments = new EnvironmentService(resolver, audit);
 const secrets = new SecretService(
   resolver,
@@ -36,6 +38,7 @@ const secrets = new SecretService(
 );
 const app = await buildApi({
   database,
+  apiKeys,
   projects,
   environments,
   secrets,
@@ -88,6 +91,7 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
     "/api/v1/projects/{projectId}/environments/{environmentId}/secrets/bulk-get",
     "/api/v1/secrets/{secretId}/versions",
     "/api/v1/tags",
+    "/api/v1/api-keys",
   ]) assert.ok(document.paths[path], `OpenAPI path missing: ${path}`);
   const operationIds = Object.values(document.paths).flatMap((methods) =>
     Object.values(methods).map(({ operationId }) => operationId).filter(Boolean),
@@ -270,6 +274,40 @@ test("maps RBAC and tenant isolation failures to non-leaking HTTP errors", async
     payload: { name: "denied", color: "#112233" },
   });
   assert.equal(memberTagWrite.statusCode, 403);
+});
+
+test("manages scoped API keys while revealing token material only at creation", async () => {
+  const created = await app.inject({
+    method: "POST", url: "/api/v1/api-keys", headers: headers(orgA, ownerA),
+    payload: {
+      name: "API managed CI key",
+      access: "read_write",
+      projectId,
+      environmentId: developmentId,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    },
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  assert.match(created.json().data.token, /^himi_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$/);
+  const apiKeyId = created.json().data.apiKey.id;
+
+  const listed = await app.inject({ method: "GET", url: "/api/v1/api-keys?limit=1", headers: headers(orgA, ownerA) });
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.equal(listed.json().meta.total, 1);
+  assert.equal("token" in listed.json().data[0], false);
+  assert.equal(listed.body.includes(created.json().data.token), false);
+
+  const denied = await app.inject({
+    method: "POST", url: "/api/v1/api-keys", headers: headers(orgA, memberA),
+    payload: { name: "Denied", access: "read_only" },
+  });
+  assert.equal(denied.statusCode, 403);
+
+  const revoked = await app.inject({
+    method: "DELETE", url: `/api/v1/api-keys/${apiKeyId}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(revoked.statusCode, 200, revoked.body);
+  assert.ok(revoked.json().data.revokedAt);
 });
 
 test("deletes tags and projects through their v1 lifecycle endpoints", async () => {

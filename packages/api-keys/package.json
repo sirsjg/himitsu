@@ -1,5 +1,5 @@
 {
-  "name": "@himitsu/api",
+  "name": "@himitsu/api-keys",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -17,16 +17,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@fastify/swagger": "^9.6.1",
-    "@himitsu/api-keys": "0.0.0",
     "@himitsu/audit": "0.0.0",
     "@himitsu/authz": "0.0.0",
-    "@himitsu/crypto": "0.0.0",
-    "@himitsu/environments": "0.0.0",
-    "@himitsu/projects": "0.0.0",
-    "@himitsu/secrets": "0.0.0",
     "@himitsu/tenancy": "0.0.0",
-    "fastify": "^5.10.0",
     "pg": "^8.16.3"
   }
 }
