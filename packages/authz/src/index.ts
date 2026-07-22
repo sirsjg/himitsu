@@ -85,6 +85,7 @@ const projectScopedPermissions = new Set<Permission>([
 ]);
 
 const protectedWritePermissions = new Set<Permission>([
+  "environment.create",
   "environment.update",
   "environment.delete",
   "secret.write",
