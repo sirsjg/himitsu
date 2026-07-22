@@ -385,6 +385,140 @@ test("imports batches with skip, overwrite, and merge selection under one value-
   );
 });
 
+test("previews and atomically promotes selected or all secrets across environments", async () => {
+  await assert.rejects(
+    database.withOrg(orgA, memberA, (transaction) => secrets.previewPromotion(
+      transaction,
+      memberA,
+      projectA,
+      developmentEnvironmentId,
+      productionEnvironmentId,
+      ["DATABASE_URL"],
+    )),
+    (error: unknown) => error instanceof AuthorizationError
+      && error.decision.reason === "protected_environment",
+  );
+  await database.withOrg(orgA, ownerA, async (transaction) => {
+    await assert.rejects(
+      secrets.previewPromotion(
+        transaction,
+        ownerA,
+        projectA,
+        developmentEnvironmentId,
+        developmentEnvironmentId,
+      ),
+      (error: unknown) => error instanceof SecretError && error.code === "INVALID_INPUT",
+    );
+    await assert.rejects(
+      secrets.previewPromotion(
+        transaction,
+        ownerA,
+        projectA,
+        developmentEnvironmentId,
+        productionEnvironmentId,
+        ["MISSING_SOURCE_KEY"],
+      ),
+      (error: unknown) => error instanceof SecretError && error.code === "NOT_FOUND",
+    );
+    const preview = await secrets.previewPromotion(
+      transaction,
+      ownerA,
+      projectA,
+      developmentEnvironmentId,
+      productionEnvironmentId,
+      ["DATABASE_URL", "CACHE_URL"],
+    );
+    assert.deepEqual(preview.summary, { selected: 2, created: 2, overwritten: 0 });
+    assert.deepEqual(preview.items.map(({ key, action, changed }) => ({ key, action, changed })), [
+      { key: "CACHE_URL", action: "create", changed: true },
+      { key: "DATABASE_URL", action: "create", changed: true },
+    ]);
+
+    const first = await secrets.promote(
+      transaction,
+      ownerA,
+      projectA,
+      developmentEnvironmentId,
+      productionEnvironmentId,
+      ["DATABASE_URL", "CACHE_URL"],
+    );
+    assert.deepEqual(first.summary, { selected: 2, created: 2, overwritten: 0 });
+    const production = await secrets.list(transaction, ownerA, projectA, productionEnvironmentId);
+    const database = production.find(({ key }) => key === "DATABASE_URL");
+    const cache = production.find(({ key }) => key === "CACHE_URL");
+    assert.ok(database);
+    assert.ok(cache);
+    assert.equal((await secrets.get(transaction, ownerA, database.id)).value, "postgres://dotenv-merge");
+    assert.equal((await secrets.get(transaction, ownerA, cache.id)).value, "redis://cache");
+    const allPreview = await secrets.previewPromotion(
+      transaction,
+      ownerA,
+      projectA,
+      developmentEnvironmentId,
+      productionEnvironmentId,
+    );
+    const sourceCount = (await secrets.list(transaction, ownerA, projectA, developmentEnvironmentId)).length;
+    assert.equal(allPreview.summary.selected, sourceCount);
+    assert.equal(allPreview.items.find(({ key }) => key === "DATABASE_URL")?.changed, false);
+    const promotedAll = await secrets.promote(
+      transaction,
+      ownerA,
+      projectA,
+      developmentEnvironmentId,
+      productionEnvironmentId,
+    );
+    assert.deepEqual(promotedAll.summary, { selected: sourceCount, created: sourceCount - 2, overwritten: 2 });
+
+    const sourceDatabase = (await secrets.list(transaction, ownerA, projectA, developmentEnvironmentId))
+      .find(({ key }) => key === "DATABASE_URL");
+    assert.ok(sourceDatabase);
+    await secrets.update(transaction, ownerA, sourceDatabase.id, { value: "postgres://promoted-again" });
+    const overwritePreview = await secrets.previewPromotion(
+      transaction,
+      ownerA,
+      projectA,
+      developmentEnvironmentId,
+      productionEnvironmentId,
+      ["DATABASE_URL"],
+    );
+    assert.deepEqual(overwritePreview.items, [{
+      key: "DATABASE_URL",
+      action: "overwrite",
+      changed: true,
+      sourceVersion: sourceDatabase.currentVersion + 1,
+      targetVersion: 2,
+    }]);
+    const overwritten = await secrets.promote(
+      transaction,
+      ownerA,
+      projectA,
+      developmentEnvironmentId,
+      productionEnvironmentId,
+      ["DATABASE_URL"],
+    );
+    assert.deepEqual(overwritten.summary, { selected: 1, created: 0, overwritten: 1 });
+    assert.equal((await secrets.get(transaction, ownerA, database.id)).value, "postgres://promoted-again");
+    assert.equal((await secrets.listVersions(transaction, ownerA, database.id))[0]?.version, 3);
+
+    const events = await transaction.query<{ metadata: Record<string, unknown> }>(
+      "SELECT metadata FROM audit_events WHERE action = 'secret.promoted' ORDER BY id",
+    );
+    assert.equal(events.rowCount, 3);
+    assert.deepEqual(
+      events.rows.map(({ metadata }) => {
+        const details = metadata.details as { created: number; overwritten: number };
+        return { created: details.created, overwritten: details.overwritten };
+      }),
+      [
+        { created: 2, overwritten: 0 },
+        { created: sourceCount - 2, overwritten: 2 },
+        { created: 0, overwritten: 1 },
+      ],
+    );
+    assert.doesNotMatch(JSON.stringify(events.rows), /postgres:\/\/|redis:\/\//);
+  });
+});
+
 test("forced RLS prevents cross-tenant secret access", async () => {
   const otherSecretId = await database.withOrg(orgB, ownerB, async (transaction) => {
     const environment = await transaction.query<{ id: string }>(

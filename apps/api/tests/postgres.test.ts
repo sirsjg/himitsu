@@ -150,6 +150,8 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
     "/api/v1/audit-events/export",
     "/api/v1/audit-settings",
     "/api/v1/projects/{projectId}/environments/{environmentId}/secrets/bulk-get",
+    "/api/v1/projects/{projectId}/environments/{environmentId}/promotions/preview",
+    "/api/v1/projects/{projectId}/environments/{environmentId}/promotions",
     "/api/v1/secrets/{secretId}/versions",
     "/api/v1/tags",
     "/api/v1/api-keys",
@@ -685,6 +687,62 @@ test("previews and commits flat or nested JSON with stable primitive conversion"
   assert.doesNotMatch(JSON.stringify(auditRows.rows), /db\.internal|redis:\/\/json-update/);
 });
 
+test("previews and promotes selected secrets while enforcing target protection", async () => {
+  const denied = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/promotions/preview`,
+    headers: headers(orgA, memberA),
+    payload: { sourceEnvironmentId: developmentId, keys: ["CACHE_URL", "DATABASE__HOST"] },
+  });
+  assert.equal(denied.statusCode, 403, denied.body);
+
+  const preview = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/promotions/preview`,
+    headers: headers(orgA, ownerA),
+    payload: { sourceEnvironmentId: developmentId, keys: ["CACHE_URL", "DATABASE__HOST"] },
+  });
+  assert.equal(preview.statusCode, 200, preview.body);
+  assert.deepEqual(preview.json().data.summary, { selected: 2, created: 2, overwritten: 0 });
+  assert.equal(preview.body.includes("redis://json-update"), false);
+  assert.equal(preview.body.includes("db.internal"), false);
+
+  const promoted = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/promotions`,
+    headers: headers(orgA, ownerA),
+    payload: { sourceEnvironmentId: developmentId, keys: ["CACHE_URL", "DATABASE__HOST"] },
+  });
+  assert.equal(promoted.statusCode, 200, promoted.body);
+  assert.deepEqual(promoted.json().data.summary, { selected: 2, created: 2, overwritten: 0 });
+  assert.equal(promoted.json().data.secrets.length, 2);
+  assert.equal(promoted.body.includes("redis://json-update"), false);
+
+  const values = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/secrets/bulk-get`,
+    headers: headers(orgA, ownerA),
+    payload: { keys: ["CACHE_URL", "DATABASE__HOST"] },
+  });
+  assert.equal(values.statusCode, 200, values.body);
+  assert.deepEqual(values.json().data, { CACHE_URL: "redis://json-update", DATABASE__HOST: "db.internal" });
+
+  const overwrite = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/promotions/preview`,
+    headers: headers(orgA, ownerA),
+    payload: { sourceEnvironmentId: developmentId, keys: ["CACHE_URL"] },
+  });
+  assert.equal(overwrite.statusCode, 200, overwrite.body);
+  assert.equal(overwrite.json().data.items[0].action, "overwrite");
+
+  const auditRows = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{ metadata: Record<string, unknown> }>(
+    "SELECT metadata FROM audit_events WHERE action = 'secret.promoted' ORDER BY id",
+  ));
+  assert.equal(auditRows.rowCount, 1);
+  assert.doesNotMatch(JSON.stringify(auditRows.rows), /db\.internal|redis:\/\/json-update/);
+});
+
 test("maps RBAC and tenant isolation failures to non-leaking HTTP errors", async () => {
   const protectedWrite = await app.inject({
     method: "POST",
@@ -780,6 +838,15 @@ test("manages scoped API keys while revealing token material only at creation", 
   });
   assert.equal(wrongEnvironment.statusCode, 403);
   assert.equal(wrongEnvironment.json().error.code, "API_SCOPE_FORBIDDEN");
+
+  const crossEnvironmentPromotion = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/promotions/preview`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: { sourceEnvironmentId: productionId, keys: ["CACHE_URL"] },
+  });
+  assert.equal(crossEnvironmentPromotion.statusCode, 403, crossEnvironmentPromotion.body);
+  assert.equal(crossEnvironmentPromotion.json().error.code, "API_SCOPE_FORBIDDEN");
 
   const scopedProjects = await app.inject({
     method: "GET", url: "/api/v1/projects", headers: { authorization: `Bearer ${token}` },

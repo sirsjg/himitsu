@@ -76,6 +76,25 @@ export interface SecretImportResult {
   };
 }
 
+export interface SecretPromotionPreviewItem {
+  readonly key: string;
+  readonly action: "create" | "overwrite";
+  readonly changed: boolean;
+  readonly sourceVersion: number;
+  readonly targetVersion: number | null;
+}
+
+export interface SecretPromotionPreview {
+  readonly sourceEnvironmentId: string;
+  readonly targetEnvironmentId: string;
+  readonly items: readonly SecretPromotionPreviewItem[];
+  readonly summary: { readonly selected: number; readonly created: number; readonly overwritten: number };
+}
+
+export interface SecretPromotionResult extends SecretPromotionPreview {
+  readonly secrets: readonly SecretMetadata[];
+}
+
 interface SecretRow {
   id: string;
   org_id: string;
@@ -560,6 +579,108 @@ export class SecretService {
     return { secrets: results, summary: { requested: normalized.length, created, updated, skipped } };
   }
 
+  async previewPromotion(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    projectId: string,
+    sourceEnvironmentId: string,
+    targetEnvironmentId: string,
+    keys?: readonly string[],
+  ): Promise<SecretPromotionPreview> {
+    const normalizedKeys = await this.#authorizePromotion(
+      transaction, actorUserId, projectId, sourceEnvironmentId, targetEnvironmentId, keys,
+    );
+    const rows = await transaction.query<SecretValueRow>(
+      `SELECT ${secretColumns}, sv.value_ciphertext, sv.nonce, sv.auth_tag, sv.encryption_key_version
+       FROM secrets s
+       JOIN secret_versions sv
+         ON sv.org_id = s.org_id AND sv.secret_id = s.id AND sv.version = s.current_version
+       WHERE s.project_id = $1 AND s.environment_id = ANY($2::uuid[])
+         AND s.deleted_at IS NULL
+         ${normalizedKeys === undefined ? "" : "AND s.key = ANY($3::text[])"}
+       ORDER BY s.environment_id, s.key`,
+      normalizedKeys === undefined
+        ? [projectId, [sourceEnvironmentId, targetEnvironmentId]]
+        : [projectId, [sourceEnvironmentId, targetEnvironmentId], normalizedKeys],
+    );
+    return this.#promotionPreview(transaction, rows.rows, sourceEnvironmentId, targetEnvironmentId, normalizedKeys);
+  }
+
+  async promote(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    projectId: string,
+    sourceEnvironmentId: string,
+    targetEnvironmentId: string,
+    keys?: readonly string[],
+  ): Promise<SecretPromotionResult> {
+    const normalizedKeys = await this.#authorizePromotion(
+      transaction, actorUserId, projectId, sourceEnvironmentId, targetEnvironmentId, keys,
+    );
+    const rows = await transaction.query<SecretValueRow>(
+      `SELECT ${secretColumns}, sv.value_ciphertext, sv.nonce, sv.auth_tag, sv.encryption_key_version
+       FROM secrets s
+       JOIN secret_versions sv
+         ON sv.org_id = s.org_id AND sv.secret_id = s.id AND sv.version = s.current_version
+       WHERE s.project_id = $1 AND s.environment_id = ANY($2::uuid[])
+         AND s.deleted_at IS NULL
+         ${normalizedKeys === undefined ? "" : "AND s.key = ANY($3::text[])"}
+       ORDER BY s.environment_id, s.key
+       FOR UPDATE OF s`,
+      normalizedKeys === undefined
+        ? [projectId, [sourceEnvironmentId, targetEnvironmentId]]
+        : [projectId, [sourceEnvironmentId, targetEnvironmentId], normalizedKeys],
+    );
+    const preview = await this.#promotionPreview(transaction, rows.rows, sourceEnvironmentId, targetEnvironmentId, normalizedKeys);
+    const sources = rows.rows.filter(({ environment_id: environmentId }) => environmentId === sourceEnvironmentId);
+    const targets = new Map(rows.rows
+      .filter(({ environment_id: environmentId }) => environmentId === targetEnvironmentId)
+      .map((row) => [row.key, row]));
+    const promoted: SecretMetadata[] = [];
+    for (const source of sources) {
+      const sourceEncryption = this.#encryption(transaction);
+      const plaintext = await sourceEncryption.decrypt(this.#encrypted(source), {
+        orgId: source.org_id,
+        projectId: source.project_id,
+        environmentId: source.environment_id,
+        secretId: source.id,
+        recordVersion: source.current_version,
+      });
+      try {
+        const input = {
+          value: plaintext.toString("utf8"),
+          notes: source.notes,
+          changeNote: `Promoted from environment ${sourceEnvironmentId}`,
+        };
+        const target = targets.get(source.key);
+        promoted.push(target === undefined
+          ? await this.#create(transaction, actorUserId, projectId, targetEnvironmentId, {
+            key: source.key, allowNonConformingKey: true, ...input,
+          }, true, false)
+          : await this.#writeVersion(transaction, actorUserId, target, input, "secret.updated", false));
+      } finally {
+        plaintext.fill(0);
+        sourceEncryption.clearKeyCache();
+      }
+    }
+    await this.#audit.recordInTransaction(transaction, {
+      orgId: transaction.orgId,
+      actor: { type: "user", id: actorUserId },
+      action: "secret.promoted",
+      resource: { type: "environment", id: targetEnvironmentId },
+      projectId,
+      environmentId: targetEnvironmentId,
+      details: {
+        sourceEnvironmentId,
+        targetEnvironmentId,
+        created: preview.summary.created,
+        overwritten: preview.summary.overwritten,
+        keys: preview.items.map(({ key }) => key),
+      },
+    });
+    return { ...preview, secrets: promoted };
+  }
+
   async delete(
     transaction: TenantTransaction,
     actorUserId: string,
@@ -789,6 +910,104 @@ export class SecretService {
     const row = result.rows[0];
     if (row === undefined) throw new SecretError("NOT_FOUND", "Environment not found");
     return row;
+  }
+
+  async #authorizePromotion(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    projectId: string,
+    sourceEnvironmentId: string,
+    targetEnvironmentId: string,
+    keys?: readonly string[],
+  ): Promise<readonly string[] | undefined> {
+    if (sourceEnvironmentId === targetEnvironmentId) {
+      throw new SecretError("INVALID_INPUT", "Source and target environments must be different");
+    }
+    const normalizedKeys = keys?.map((key) => validateSecretKey(key, true));
+    if (normalizedKeys !== undefined && (normalizedKeys.length < 1 || new Set(normalizedKeys).size !== normalizedKeys.length)) {
+      throw new SecretError("INVALID_INPUT", "Selected promotion keys must be non-empty and unique");
+    }
+    const source = await this.#environment(transaction, projectId, sourceEnvironmentId);
+    const target = await this.#environment(transaction, projectId, targetEnvironmentId);
+    requirePermission(
+      await this.#resolver.resolve(transaction, actorUserId, projectId, source.protected),
+      "secret.read",
+    );
+    requirePermission(
+      await this.#resolver.resolve(transaction, actorUserId, projectId, target.protected),
+      "secret.write",
+    );
+    return normalizedKeys;
+  }
+
+  async #promotionPreview(
+    transaction: TenantTransaction,
+    rows: readonly SecretValueRow[],
+    sourceEnvironmentId: string,
+    targetEnvironmentId: string,
+    selectedKeys?: readonly string[],
+  ): Promise<SecretPromotionPreview> {
+    const sources = rows.filter(({ environment_id: environmentId }) => environmentId === sourceEnvironmentId);
+    const targets = new Map(rows
+      .filter(({ environment_id: environmentId }) => environmentId === targetEnvironmentId)
+      .map((row) => [row.key, row]));
+    if (selectedKeys !== undefined) {
+      const found = new Set(sources.map(({ key }) => key));
+      const missing = selectedKeys.filter((key) => !found.has(key));
+      if (missing.length > 0) throw new SecretError("NOT_FOUND", `Source secrets not found: ${missing.join(", ")}`);
+    }
+    const items: SecretPromotionPreviewItem[] = [];
+    for (const source of sources) {
+      const target = targets.get(source.key);
+      items.push({
+        key: source.key,
+        action: target === undefined ? "create" : "overwrite",
+        changed: target === undefined ? true : await this.#valuesDiffer(transaction, source, target),
+        sourceVersion: source.current_version,
+        targetVersion: target?.current_version ?? null,
+      });
+    }
+    return {
+      sourceEnvironmentId,
+      targetEnvironmentId,
+      items,
+      summary: {
+        selected: items.length,
+        created: items.filter(({ action }) => action === "create").length,
+        overwritten: items.filter(({ action }) => action === "overwrite").length,
+      },
+    };
+  }
+
+  async #valuesDiffer(
+    transaction: TenantTransaction,
+    source: SecretValueRow,
+    target: SecretValueRow,
+  ): Promise<boolean> {
+    const encryption = this.#encryption(transaction);
+    const sourcePlaintext = await encryption.decrypt(this.#encrypted(source), {
+      orgId: source.org_id,
+      projectId: source.project_id,
+      environmentId: source.environment_id,
+      secretId: source.id,
+      recordVersion: source.current_version,
+    });
+    let targetPlaintext: Buffer | undefined;
+    try {
+      targetPlaintext = await encryption.decrypt(this.#encrypted(target), {
+        orgId: target.org_id,
+        projectId: target.project_id,
+        environmentId: target.environment_id,
+        secretId: target.id,
+        recordVersion: target.current_version,
+      });
+      return sourcePlaintext.length !== targetPlaintext.length
+        || !timingSafeEqual(sourcePlaintext, targetPlaintext);
+    } finally {
+      sourcePlaintext.fill(0);
+      targetPlaintext?.fill(0);
+      encryption.clearKeyCache();
+    }
   }
 
   #encryption(transaction: TenantTransaction): EnvelopeEncryptionService {

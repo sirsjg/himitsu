@@ -245,6 +245,37 @@ const importResultSchema = {
     },
   },
 } as const;
+const promotionPreviewSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["sourceEnvironmentId", "targetEnvironmentId", "items", "summary"],
+  properties: {
+    sourceEnvironmentId: uuid,
+    targetEnvironmentId: uuid,
+    items: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["key", "action", "changed", "sourceVersion", "targetVersion"],
+        properties: {
+          key: { type: "string" }, action: { type: "string", enum: ["create", "overwrite"] },
+          changed: { type: "boolean" },
+          sourceVersion: { type: "integer", minimum: 1 }, targetVersion: { type: ["integer", "null"], minimum: 1 },
+        },
+      },
+    },
+    summary: {
+      type: "object", additionalProperties: false,
+      required: ["selected", "created", "overwritten"],
+      properties: { selected: { type: "integer" }, created: { type: "integer" }, overwritten: { type: "integer" } },
+    },
+  },
+} as const;
+const promotionResultSchema = {
+  ...promotionPreviewSchema,
+  required: [...promotionPreviewSchema.required, "secrets"],
+  properties: { ...promotionPreviewSchema.properties, secrets: { type: "array", items: secretMetadataSchema } },
+} as const;
 const jsonIssueSchema = {
   type: "object",
   additionalProperties: false,
@@ -383,6 +414,8 @@ export const apiRoutePermissions = Object.freeze({
   createSecret: "secret.write",
   bulkSetSecrets: "secret.write",
   bulkGetSecrets: "secret.read",
+  previewSecretPromotion: "secret.write",
+  promoteSecrets: "secret.write",
   getSecret: "secret.read",
   updateSecret: "secret.write",
   deleteSecret: "secret.delete",
@@ -1146,6 +1179,45 @@ function registerSecretRoutes(
     );
     return { data: result };
   }));
+  const promotionBody = {
+    type: "object", additionalProperties: false, required: ["sourceEnvironmentId"],
+    properties: {
+      sourceEnvironmentId: uuid,
+      keys: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 255 } },
+    },
+  } as const;
+  app.post("/api/v1/projects/:projectId/environments/:environmentId/promotions/preview", {
+    schema: {
+      operationId: "previewSecretPromotion", tags: ["secrets"], params: scopeParams,
+      body: promotionBody, response: apiResponses(promotionPreviewSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const body = request.body as { sourceEnvironmentId: string; keys?: string[] };
+    return { data: await dependencies.secrets.previewPromotion(
+      transaction,
+      context.userId,
+      params(request).projectId ?? "",
+      body.sourceEnvironmentId,
+      params(request).environmentId ?? "",
+      body.keys,
+    ) };
+  }));
+  app.post("/api/v1/projects/:projectId/environments/:environmentId/promotions", {
+    schema: {
+      operationId: "promoteSecrets", tags: ["secrets"], params: scopeParams,
+      body: promotionBody, response: apiResponses(promotionResultSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const body = request.body as { sourceEnvironmentId: string; keys?: string[] };
+    return { data: await dependencies.secrets.promote(
+      transaction,
+      context.userId,
+      params(request).projectId ?? "",
+      body.sourceEnvironmentId,
+      params(request).environmentId ?? "",
+      body.keys,
+    ) };
+  }));
   app.get("/api/v1/secrets/:secretId", {
     schema: { operationId: "getSecret", tags: ["secrets"], params: secretParams, response: apiResponses(secretValueSchema) },
   }, async (request) => withTenant(request, async (transaction, context) => ({ data: await dependencies.secrets.get(
@@ -1449,6 +1521,13 @@ async function enforceApiKeyScope(
     && requestParams.environmentId !== principal.environmentId
   ) {
     throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key environment scope does not match this request");
+  }
+  if (
+    principal.environmentId !== null
+    && (routeOperationId(request) === "previewSecretPromotion" || routeOperationId(request) === "promoteSecrets")
+    && (request.body as { sourceEnvironmentId?: string }).sourceEnvironmentId !== principal.environmentId
+  ) {
+    throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key environment scope does not include the promotion source");
   }
   if (requestParams.secretId !== undefined) {
     const secret = await transaction.query<{ project_id: string; environment_id: string }>(
