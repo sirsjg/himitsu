@@ -142,6 +142,44 @@ test("records system and API-key actors", async () => {
   assert.deepEqual(actors.rows.map(({ actor_type }) => actor_type), ["api_key", "system"]);
 });
 
+test("filters, cursor-paginates, exports, and updates retention without leaking tenants", async () => {
+  await audit.record({
+    orgId,
+    actor: { type: "user", id: userId },
+    action: "project.updated",
+    resource: { type: "project", id: "=spreadsheet-formula" },
+    projectId,
+    environmentId,
+    details: { field: "description" },
+  });
+  const first = await audit.list(pool, orgId, { actor: `${userId}@example.com`, projectId, limit: 1 });
+  assert.equal(first.events.length, 1);
+  assert.equal(first.events[0]?.actor.label, `${userId}@example.com`);
+  assert.equal(first.events[0]?.action, "project.updated");
+  assert.ok(first.nextCursor);
+  const next = await audit.list(pool, orgId, { cursor: first.nextCursor, limit: 1 });
+  assert.equal(next.events.some(({ id }) => id === first.events[0]?.id), false);
+  const resource = await audit.list(pool, orgId, { resource: "spreadsheet-formula" });
+  assert.equal(resource.events.length, 1);
+
+  const csv = await audit.export(pool, orgId, "csv", { action: "project.updated" });
+  assert.equal(csv.eventCount, 1);
+  assert.match(csv.content, /'=?spreadsheet-formula/);
+  assert.doesNotMatch(csv.content, /secret value/i);
+  const json = await audit.export(pool, orgId, "json", { environmentId });
+  assert.ok(JSON.parse(json.content).length >= 1);
+
+  assert.equal(await audit.getRetention(pool, orgId), 90);
+  assert.equal(await audit.updateRetention(pool, orgId, userId, 365), 365);
+  assert.equal(await audit.getRetention(pool, orgId), 365);
+  const retentionEvent = await audit.list(pool, orgId, { action: "organization.audit_retention_updated" });
+  assert.deepEqual(retentionEvent.events[0]?.metadata, {
+    before: { auditRetentionDays: 90 }, after: { auditRetentionDays: 365 },
+  });
+  await assert.rejects(() => audit.updateRetention(pool, orgId, userId, 0), /between 1 and 3650/);
+  await assert.rejects(() => audit.list(pool, orgId, { cursor: "not-a-cursor" }), /cursor is invalid/);
+});
+
 test("database trigger rejects audit updates and deletes", async () => {
   await assert.rejects(
     pool.query("UPDATE audit_events SET action = 'auth.logout' WHERE org_id = $1", [orgId]),

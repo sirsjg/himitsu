@@ -16,6 +16,7 @@ import {
   isConventionalSecretKey,
   parseBulkSecrets,
 } from "../src/SecretWorkspace.js";
+import { createAuditClient } from "../src/AuditPage.js";
 
 function renderRoute(path: string): string {
   return renderToStaticMarkup(
@@ -86,6 +87,48 @@ test("invite route renders an actionable acceptance screen", () => {
   assert.match(html, /Your invitation is ready to accept/);
   assert.match(html, /Accept invitation/);
   assert.match(html, /Use a different account/);
+});
+
+test("admin audit route renders filters, infinite history, exports, and retention policy", () => {
+  const html = renderRoute("/app/audit");
+  assert.match(html, /Audit filters/);
+  assert.match(html, /Resource search/);
+  assert.match(html, /Export CSV/);
+  assert.match(html, /Export JSON/);
+  assert.match(html, /Retention/);
+  assert.match(html, /secret.updated/);
+  assert.match(html, /Append-only/);
+  assert.doesNotMatch(html, /postgres:\/\/|sk_live_/);
+
+  const denied = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/audit"]}><AppRoutes organizations={[{ id: "member-org", name: "Member Org", role: "member" }]} /></MemoryRouter>);
+  assert.match(denied, /Administrator access required/);
+  assert.doesNotMatch(denied, /Export CSV/);
+});
+
+test("audit client preserves filters, cursors, export formats, and retention writes", async () => {
+  const calls: Array<{ input: string; method?: string; body?: unknown }> = [];
+  const client = createAuditClient(async (input, init) => {
+    calls.push({ input, ...(init?.method === undefined ? {} : { method: init.method }), ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) });
+    const data = input.startsWith("/api/v1/audit-events/export")
+      ? { format: "csv", filename: "audit.csv", mimeType: "text/csv", content: "id", eventCount: 1, truncated: false }
+      : input.startsWith("/api/v1/audit-events")
+        ? { events: [], nextCursor: null }
+        : input === "/api/v1/audit-settings" && init?.method === "PATCH"
+          ? { retentionDays: 365 }
+          : { retentionDays: 90 };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  await client.list({ actor: "owner@example.com", action: "secret.read", from: "2026-07-01T10:00" }, "next-page");
+  await client.export({ resource: "secret-7" }, "csv");
+  assert.equal(await client.getRetention(), 90);
+  assert.equal(await client.updateRetention(365), 365);
+  assert.match(calls[0]?.input ?? "", /^\/api\/v1\/audit-events\?/);
+  assert.match(calls[0]?.input ?? "", /actor=owner%40example.com/);
+  assert.match(calls[0]?.input ?? "", /action=secret.read/);
+  assert.match(calls[0]?.input ?? "", /from=2026-07-01T00%3A00%3A00.000Z|from=2026-07-01T10%3A00%3A00.000Z/);
+  assert.match(calls[0]?.input ?? "", /cursor=next-page/);
+  assert.match(calls[1]?.input ?? "", /format=csv/);
+  assert.deepEqual(calls[3], { input: "/api/v1/audit-settings", method: "PATCH", body: { retentionDays: 365 } });
 });
 
 test("bulk paste parses dotenv values and reports malformed or duplicate entries", () => {

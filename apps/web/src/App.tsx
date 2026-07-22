@@ -14,9 +14,11 @@ import {
   Route,
   Routes,
   useNavigate,
+  useOutletContext,
   useParams,
 } from "react-router-dom";
 import { SecretWorkspace } from "./SecretWorkspace.js";
+import { AuditPage } from "./AuditPage.js";
 
 export interface OrganizationOption {
   readonly id: string;
@@ -109,7 +111,7 @@ export function AppRoutes({
         <Route index element={<Navigate to="projects" replace />} />
         <Route path="projects" element={<ProjectsPage projects={projects} />} />
         <Route path="projects/:projectId" element={<ProjectLanding projects={projects} />} />
-        <Route path="audit" element={<SectionPage eyebrow="Governance" title="Audit log" copy="Trace sensitive activity across your organization with immutable, secret-safe records." />} />
+        <Route path="audit" element={<AuditRoute />} />
         <Route path="settings" element={<SectionPage eyebrow="Workspace" title="Settings" copy="Manage members, access, service credentials, tags, and organization policy." />} />
       </Route>
       <Route path="*" element={<Navigate to="/app/projects" replace />} />
@@ -201,7 +203,7 @@ function AppShell({
             </details>
           </div>
         </header>
-        <main className="content"><Outlet /></main>
+        <main className="content"><Outlet context={{ role: activeOrg?.role ?? "read_only" }} /></main>
       </div>
       {paletteOpen ? (
         <CommandPalette
@@ -212,6 +214,11 @@ function AppShell({
       ) : null}
     </div>
   );
+}
+
+function AuditRoute(): ReactNode {
+  const { role } = useOutletContext<{ role: OrganizationOption["role"] }>();
+  return <AuditPage role={role} />;
 }
 
 function NavigationLink({ to, label, icon }: { to: string; label: string; icon: IconName }): ReactNode {

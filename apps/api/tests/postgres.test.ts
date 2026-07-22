@@ -145,6 +145,9 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
     "/api/v1/projects",
     "/api/v1/projects/{projectId}/environments",
     "/api/v1/projects/{projectId}/consistency",
+    "/api/v1/audit-events",
+    "/api/v1/audit-events/export",
+    "/api/v1/audit-settings",
     "/api/v1/projects/{projectId}/environments/{environmentId}/secrets/bulk-get",
     "/api/v1/secrets/{secretId}/versions",
     "/api/v1/tags",
@@ -447,6 +450,73 @@ test("returns a value-free consistency matrix and exit-code-friendly summary", a
     headers: headers(orgB, ownerB),
   });
   assert.equal(otherTenant.statusCode, 404, otherTenant.body);
+});
+
+test("provides admin-only filtered audit browsing, export, and retention settings", async () => {
+  const denied = await app.inject({ method: "GET", url: "/api/v1/audit-events", headers: headers(orgA, memberA) });
+  assert.equal(denied.statusCode, 403, denied.body);
+
+  const first = await app.inject({
+    method: "GET",
+    url: `/api/v1/audit-events?limit=1&actor=${encodeURIComponent("api-owner-a@example.com")}`,
+    headers: headers(orgA, ownerA),
+  });
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(first.json().data.events.length, 1);
+  assert.ok(first.json().data.nextCursor);
+  assert.equal(first.body.includes("postgres://"), false);
+  const second = await app.inject({
+    method: "GET",
+    url: `/api/v1/audit-events?limit=1&cursor=${encodeURIComponent(first.json().data.nextCursor)}`,
+    headers: headers(orgA, ownerA),
+  });
+  assert.equal(second.statusCode, 200, second.body);
+  assert.notEqual(second.json().data.events[0]?.id, first.json().data.events[0].id);
+
+  const filtered = await app.inject({
+    method: "GET",
+    url: `/api/v1/audit-events?action=secret.created&projectId=${projectId}&environmentId=${developmentId}&resource=${secretId}`,
+    headers: headers(orgA, ownerA),
+  });
+  assert.equal(filtered.statusCode, 200, filtered.body);
+  assert.ok(filtered.json().data.events.length >= 1);
+  assert.equal(filtered.json().data.events.every((event: { action: string }) => event.action === "secret.created"), true);
+  const future = await app.inject({
+    method: "GET", url: "/api/v1/audit-events?from=2100-01-01T00%3A00%3A00.000Z", headers: headers(orgA, ownerA),
+  });
+  assert.equal(future.statusCode, 200, future.body);
+  assert.deepEqual(future.json().data.events, []);
+
+  const csv = await app.inject({
+    method: "GET", url: `/api/v1/audit-events/export?format=csv&projectId=${projectId}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(csv.statusCode, 200, csv.body);
+  assert.equal(csv.json().data.format, "csv");
+  assert.match(csv.json().data.content, /occurred_at/);
+  assert.equal(csv.json().data.content.includes("postgres://"), false);
+  const json = await app.inject({
+    method: "GET", url: `/api/v1/audit-events/export?format=json&projectId=${projectId}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(json.statusCode, 200, json.body);
+  assert.ok(JSON.parse(json.json().data.content).length >= 1);
+
+  const settings = await app.inject({ method: "GET", url: "/api/v1/audit-settings", headers: headers(orgA, ownerA) });
+  assert.equal(settings.statusCode, 200, settings.body);
+  assert.equal(settings.json().data.retentionDays, 90);
+  const updated = await app.inject({
+    method: "PATCH", url: "/api/v1/audit-settings", headers: headers(orgA, ownerA), payload: { retentionDays: 365 },
+  });
+  assert.equal(updated.statusCode, 200, updated.body);
+  assert.equal(updated.json().data.retentionDays, 365);
+  const retentionAudit = await app.inject({
+    method: "GET", url: "/api/v1/audit-events?action=organization.audit_retention_updated", headers: headers(orgA, ownerA),
+  });
+  assert.equal(retentionAudit.statusCode, 200, retentionAudit.body);
+  assert.equal(retentionAudit.json().data.events.length, 1);
+
+  const otherTenant = await app.inject({ method: "GET", url: "/api/v1/audit-events", headers: headers(orgB, ownerB) });
+  assert.equal(otherTenant.statusCode, 200, otherTenant.body);
+  assert.equal(otherTenant.body.includes(projectId), false);
 });
 
 test("previews and commits dotenv imports with explicit conflict strategies", async () => {

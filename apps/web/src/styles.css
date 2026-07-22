@@ -118,6 +118,46 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .quiet-panel .brand-mark { margin-bottom: 14px; transform: scale(1.5) skewY(-8deg); }
 .quiet-panel h2 { margin: 14px 0 5px; font-family: "Newsreader", serif; font-size: 27px; font-weight: 500; }
 .quiet-panel p { color: var(--muted); font-size: 13px; }
+.audit-page { max-width: 1380px; gap: 24px; }
+.audit-controls { display: grid; gap: 12px; }
+.audit-controls form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; padding: 15px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.audit-controls label { display: grid; gap: 6px; color: var(--faint); font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
+.audit-controls input, .audit-controls select { width: 100%; height: 37px; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; outline: 0; color: var(--ink); background: var(--bg); font-size: 9px; }
+.audit-controls input:focus, .audit-controls select:focus { border-color: var(--accent); }
+.audit-resource { grid-column: span 3; }
+.audit-controls form > .primary-button { align-self: end; justify-content: center; height: 37px; }
+.audit-tools { min-height: 49px; display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.audit-tools label { display: flex; grid-template-columns: none; align-items: center; gap: 6px; margin-right: auto; }
+.audit-tools label input { width: 70px; height: 32px; text-align: right; }
+.audit-tools button { height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface); font-size: 8px; cursor: pointer; }
+.audit-tools button:hover { color: var(--accent); border-color: var(--accent); }
+.audit-tools button:disabled { opacity: .45; cursor: wait; }
+.audit-tools i { width: 1px; height: 22px; margin: 0 4px; background: var(--line); }
+.audit-error { margin: 0; padding: 10px 13px; border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--line)); border-radius: 6px; color: var(--danger); background: color-mix(in srgb, var(--danger) 6%, transparent); font-size: 9px; }
+.audit-stream { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.audit-stream > header { min-height: 39px; display: flex; align-items: center; justify-content: space-between; padding: 0 13px; color: var(--faint); background: var(--surface-2); font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; letter-spacing: .08em; }
+.audit-stream article { display: grid; grid-template-columns: 145px minmax(165px, .9fr) minmax(220px, 1.2fr) minmax(180px, 1fr) 90px; align-items: center; gap: 14px; min-height: 76px; padding: 11px 14px; border-top: 1px solid var(--line); }
+.audit-stream article:hover { background: var(--surface-2); }
+.audit-stream time { color: var(--faint); font-family: "DM Mono", monospace; font-size: 7px; }
+.audit-actor { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.audit-actor > i { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--accent); }
+.audit-actor.api_key > i { border-radius: 2px; background: #f0bf68; }
+.audit-actor.system > i { background: var(--faint); }
+.audit-actor span { min-width: 0; display: grid; gap: 2px; }
+.audit-actor strong { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.audit-actor small { color: var(--faint); font-family: "DM Mono", monospace; font-size: 6px; text-transform: uppercase; }
+.audit-action, .audit-scope { min-width: 0; display: grid; gap: 4px; }
+.audit-action code { color: var(--accent); font-family: "DM Mono", monospace; font-size: 8px; }
+.audit-action span, .audit-scope span { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.audit-scope span { color: var(--faint); font-family: "DM Mono", monospace; font-size: 6px; }
+.audit-stream details { position: relative; justify-self: end; }
+.audit-stream summary { padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 7px; cursor: pointer; list-style: none; }
+.audit-stream pre { position: absolute; z-index: 3; top: 25px; right: 0; width: 330px; max-height: 240px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--muted); background: var(--bg); box-shadow: var(--shadow); font-family: "DM Mono", monospace; font-size: 7px; white-space: pre-wrap; }
+.audit-sentinel, .audit-empty { min-height: 50px; display: grid; place-items: center; border-top: 1px solid var(--line); color: var(--faint); font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
+.audit-sentinel button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--accent); background: transparent; cursor: pointer; }
+.audit-denied { min-height: 300px; display: grid; place-items: center; align-content: center; gap: 7px; border: 1px dashed var(--danger); border-radius: 10px; text-align: center; }
+.audit-denied strong { font-family: "Newsreader", serif; font-size: 25px; font-weight: 500; }
+.audit-denied p { max-width: 480px; color: var(--muted); font-size: 11px; }
 
 .palette-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: start center; padding-top: 13vh; background: rgb(4 5 4 / 72%); backdrop-filter: blur(8px); }
 .command-palette { width: min(640px, calc(100vw - 48px)); overflow: hidden; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }

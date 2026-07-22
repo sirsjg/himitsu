@@ -1,6 +1,6 @@
 import swagger from "@fastify/swagger";
 import { ApiKeyError, type ApiKeyPrincipal, type ApiKeyService } from "@himitsu/api-keys";
-import type { TransactionalAuditLog } from "@himitsu/audit";
+import { AuditError, type AuditEventFilters, type TransactionalAuditLog } from "@himitsu/audit";
 import { AuthError, sessionCookie, type AuthService } from "@himitsu/auth";
 import {
   AuthorizationContextResolver,
@@ -331,6 +331,36 @@ const consistencyReportSchema = {
     } },
   },
 } as const;
+const auditEventSchema = {
+  type: "object", additionalProperties: false,
+  required: ["id", "actor", "action", "resource", "projectId", "environmentId", "ip", "userAgent", "metadata", "occurredAt"],
+  properties: {
+    id: { type: "string", pattern: "^[0-9]+$" },
+    actor: { type: "object", additionalProperties: false, required: ["type", "id", "label"], properties: {
+      type: { type: "string", enum: ["user", "api_key", "system"] }, id: { type: ["string", "null"] }, label: { type: "string" },
+    } },
+    action: { type: "string" },
+    resource: { type: "object", additionalProperties: false, required: ["type", "id"], properties: { type: { type: "string" }, id: { type: ["string", "null"] } } },
+    projectId: nullableUuid, environmentId: nullableUuid, ip: { type: ["string", "null"] }, userAgent: { type: ["string", "null"] },
+    metadata: { type: "object", additionalProperties: true }, occurredAt: dateTime,
+  },
+} as const;
+const auditPageSchema = {
+  type: "object", additionalProperties: false, required: ["events", "nextCursor"],
+  properties: { events: { type: "array", items: auditEventSchema }, nextCursor: { type: ["string", "null"] } },
+} as const;
+const auditExportSchema = {
+  type: "object", additionalProperties: false, required: ["format", "filename", "mimeType", "content", "eventCount", "truncated"],
+  properties: {
+    format: { type: "string", enum: ["csv", "json"] }, filename: { type: "string" }, mimeType: { type: "string" },
+    content: { type: "string" }, eventCount: { type: "integer" }, truncated: { type: "boolean" },
+  },
+} as const;
+const auditFilterProperties = {
+  actor: { type: "string", maxLength: 320 }, action: { type: "string", maxLength: 120 },
+  projectId: uuid, environmentId: uuid, from: dateTime, to: dateTime,
+  resource: { type: "string", maxLength: 200 },
+} as const;
 
 export const apiRoutePermissions = Object.freeze({
   listProjects: "project.read",
@@ -339,6 +369,10 @@ export const apiRoutePermissions = Object.freeze({
   updateProject: "project.update",
   deleteProject: "project.delete",
   getProjectConsistency: "secret.read",
+  listAuditEvents: "audit.read",
+  exportAuditEvents: "audit.export",
+  getAuditSettings: "audit.read",
+  updateAuditSettings: "org.settings.update",
   listEnvironments: "environment.read",
   createEnvironment: "environment.create",
   reorderEnvironments: "environment.update",
@@ -578,6 +612,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         { name: "versions" },
         { name: "imports" },
         { name: "consistency" },
+        { name: "audit" },
         { name: "tags" },
         { name: "api-keys" },
       ],
@@ -721,6 +756,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
 
   registerEnvironmentRoutes(app, dependencies, withTenant);
   registerSecretRoutes(app, dependencies, withTenant);
+  registerAuditRoutes(app, dependencies, withTenant);
   registerTagRoutes(app, withTenant);
   registerApiKeyRoutes(app, dependencies, withTenant);
 
@@ -732,6 +768,84 @@ type WithTenant = <T>(
   request: FastifyRequest,
   work: (transaction: TenantTransaction, context: ApiRequestContext) => Promise<T>,
 ) => Promise<T>;
+
+interface AuditQuery {
+  actor?: string;
+  action?: string;
+  projectId?: string;
+  environmentId?: string;
+  from?: string;
+  to?: string;
+  resource?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+function auditFilters(query: AuditQuery): AuditEventFilters {
+  return {
+    ...(query.actor === undefined ? {} : { actor: query.actor }),
+    ...(query.action === undefined ? {} : { action: query.action }),
+    ...(query.projectId === undefined ? {} : { projectId: query.projectId }),
+    ...(query.environmentId === undefined ? {} : { environmentId: query.environmentId }),
+    ...(query.from === undefined ? {} : { from: new Date(query.from) }),
+    ...(query.to === undefined ? {} : { to: new Date(query.to) }),
+    ...(query.resource === undefined ? {} : { resource: query.resource }),
+    ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+    ...(query.limit === undefined ? {} : { limit: query.limit }),
+  };
+}
+
+function registerAuditRoutes(
+  app: FastifyInstance,
+  dependencies: ApiDependencies,
+  withTenant: WithTenant,
+): void {
+  app.get("/api/v1/audit-events", {
+    schema: {
+      operationId: "listAuditEvents", tags: ["audit"],
+      querystring: { type: "object", additionalProperties: false, properties: {
+        ...auditFilterProperties,
+        cursor: { type: "string", maxLength: 1000 }, limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+      } },
+      response: apiResponses(auditPageSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction) => ({
+    data: await dependencies.audit.list(transaction, transaction.orgId, auditFilters(request.query as AuditQuery)),
+  })));
+  app.get("/api/v1/audit-events/export", {
+    schema: {
+      operationId: "exportAuditEvents", tags: ["audit"],
+      querystring: { type: "object", additionalProperties: false, required: ["format"], properties: {
+        ...auditFilterProperties, format: { type: "string", enum: ["csv", "json"] },
+      } },
+      response: apiResponses(auditExportSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction) => {
+    const query = request.query as AuditQuery & { format: "csv" | "json" };
+    return { data: await dependencies.audit.export(transaction, transaction.orgId, query.format, auditFilters(query)) };
+  }));
+  app.get("/api/v1/audit-settings", {
+    schema: { operationId: "getAuditSettings", tags: ["audit"], response: apiResponses({
+      type: "object", additionalProperties: false, required: ["retentionDays"], properties: { retentionDays: { type: "integer", minimum: 1, maximum: 3650 } },
+    }) },
+  }, async (request) => withTenant(request, async (transaction) => ({ data: {
+    retentionDays: await dependencies.audit.getRetention(transaction, transaction.orgId),
+  } })));
+  app.patch("/api/v1/audit-settings", {
+    schema: {
+      operationId: "updateAuditSettings", tags: ["audit"],
+      body: { type: "object", additionalProperties: false, required: ["retentionDays"], properties: { retentionDays: { type: "integer", minimum: 1, maximum: 3650 } } },
+      response: apiResponses({ type: "object", additionalProperties: false, required: ["retentionDays"], properties: { retentionDays: { type: "integer" } } }),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => ({ data: {
+    retentionDays: await dependencies.audit.updateRetention(
+      transaction,
+      transaction.orgId,
+      context.userId,
+      (request.body as { retentionDays: number }).retentionDays,
+    ),
+  } })));
+}
 
 function registerEnvironmentRoutes(
   app: FastifyInstance,
@@ -1284,7 +1398,7 @@ async function enforceApiKeyScope(
   }
   if (principal.projectId === null) return;
   const route = routePath(request);
-  if (route.startsWith("/api/v1/tags") || route.startsWith("/api/v1/api-keys")) {
+  if (route.startsWith("/api/v1/tags") || route.startsWith("/api/v1/api-keys") || route.startsWith("/api/v1/audit")) {
     throw new ApiError(403, "API_SCOPE_FORBIDDEN", "API key scope does not include organization resources");
   }
   const requestParams = params(request);
@@ -1360,7 +1474,7 @@ function mapError(error: unknown): ApiError {
     if (error.code === "RATE_LIMITED") return new ApiError(429, "RATE_LIMITED", "Too many authentication attempts");
     return new ApiError(401, "UNAUTHENTICATED", "Session is invalid or expired");
   }
-  if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError || error instanceof ConsistencyError) {
+  if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError || error instanceof ConsistencyError || error instanceof AuditError) {
     if (error.code === "NOT_FOUND" || error.code === "VERSION_NOT_FOUND") return new ApiError(404, error.code, error.message);
     if (error.code.endsWith("EXISTS") || error.code === "VERSION_CONFLICT") return new ApiError(409, error.code, error.message);
     return new ApiError(400, error.code, error.message);
