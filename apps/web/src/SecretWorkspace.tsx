@@ -52,6 +52,12 @@ export interface DotenvPreviewView {
   readonly summary: { readonly adds: number; readonly updates: number; readonly conflicts: number };
 }
 
+export interface JsonImportPreviewView {
+  readonly entries: readonly { readonly key: string; readonly path: string; readonly operation: "add" | "update" }[];
+  readonly conflicts: readonly { readonly path: string; readonly code: string; readonly message: string }[];
+  readonly summary: { readonly adds: number; readonly updates: number; readonly conflicts: number };
+}
+
 export interface SecretImportResultView {
   readonly secrets: readonly ApiSecretMetadata[];
   readonly summary: { readonly requested: number; readonly created: number; readonly updated: number; readonly skipped: number };
@@ -87,6 +93,8 @@ export interface SecretClient {
   bulkSet(projectId: string, environmentId: string, secrets: readonly BulkSecretInput[]): Promise<readonly ApiSecretMetadata[]>;
   previewDotenv(projectId: string, environmentId: string, content: string): Promise<DotenvPreviewView>;
   importDotenv(projectId: string, environmentId: string, content: string, strategy: "skip" | "overwrite" | "merge", selectedKeys?: readonly string[]): Promise<SecretImportResultView>;
+  previewJson(projectId: string, environmentId: string, content: string, delimiter: string): Promise<JsonImportPreviewView>;
+  importJson(projectId: string, environmentId: string, content: string, delimiter: string, strategy: "skip" | "overwrite" | "merge", selectedKeys?: readonly string[]): Promise<SecretImportResultView>;
   versions(secretId: string): Promise<readonly SecretVersionView[]>;
 }
 
@@ -155,6 +163,8 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
     bulkSet: (projectId, environmentId, secrets) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/secrets/bulk`, { method: "POST", body: JSON.stringify({ secrets }) }),
     previewDotenv: (projectId, environmentId, content) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/dotenv/preview`, { method: "POST", body: JSON.stringify({ content }) }),
     importDotenv: (projectId, environmentId, content, strategy, selectedKeys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/dotenv`, { method: "POST", body: JSON.stringify({ content, strategy, ...(selectedKeys === undefined ? {} : { selectedKeys }) }) }),
+    previewJson: (projectId, environmentId, content, delimiter) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/json/preview`, { method: "POST", body: JSON.stringify({ content, delimiter }) }),
+    importJson: (projectId, environmentId, content, delimiter, strategy, selectedKeys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/json`, { method: "POST", body: JSON.stringify({ content, delimiter, strategy, ...(selectedKeys === undefined ? {} : { selectedKeys }) }) }),
     versions: (secretId) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions?limit=100`),
   };
 }
@@ -381,9 +391,17 @@ function DotenvImport({ projectId, environmentId, client, onCancel, onImported }
   onCancel: () => void;
   onImported: (result: SecretImportResultView) => void;
 }): ReactNode {
+  type Format = "dotenv" | "json";
+  interface Preview {
+    readonly entries: readonly { readonly key: string; readonly location: string; readonly operation: "add" | "update" }[];
+    readonly conflicts: readonly { readonly location: string; readonly code: string; readonly message: string }[];
+    readonly summary: { readonly adds: number; readonly updates: number; readonly conflicts: number };
+  }
+  const [format, setFormat] = useState<Format>("dotenv");
+  const [delimiter, setDelimiter] = useState("__");
   const [source, setSource] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
-  const [preview, setPreview] = useState<DotenvPreviewView | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
   const [strategy, setStrategy] = useState<"skip" | "overwrite" | "merge">("skip");
   const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -400,9 +418,23 @@ function DotenvImport({ projectId, environmentId, client, onCancel, onImported }
     setBusy(true);
     setError(null);
     try {
-      const result = await client.previewDotenv(projectId, environmentId, source);
-      setPreview(result);
-      setSelectedKeys(new Set(result.entries.map(({ key }) => key)));
+      if (format === "dotenv") {
+        const result = await client.previewDotenv(projectId, environmentId, source);
+        setPreview({
+          entries: result.entries.map((entry) => ({ ...entry, location: `line ${entry.line}` })),
+          conflicts: result.conflicts.map((conflict) => ({ ...conflict, location: `line ${conflict.line}` })),
+          summary: result.summary,
+        });
+        setSelectedKeys(new Set(result.entries.map(({ key }) => key)));
+      } else {
+        const result = await client.previewJson(projectId, environmentId, source, delimiter);
+        setPreview({
+          entries: result.entries.map((entry) => ({ ...entry, location: entry.path })),
+          conflicts: result.conflicts.map((conflict) => ({ ...conflict, location: conflict.path })),
+          summary: result.summary,
+        });
+        setSelectedKeys(new Set(result.entries.map(({ key }) => key)));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Preview could not be generated.");
     } finally { setBusy(false); }
@@ -411,7 +443,10 @@ function DotenvImport({ projectId, environmentId, client, onCancel, onImported }
     setBusy(true);
     setError(null);
     try {
-      const result = await client.importDotenv(projectId, environmentId, source, strategy, strategy === "merge" ? [...selectedKeys] : undefined);
+      const selected = strategy === "merge" ? [...selectedKeys] : undefined;
+      const result = format === "dotenv"
+        ? await client.importDotenv(projectId, environmentId, source, strategy, selected)
+        : await client.importJson(projectId, environmentId, source, delimiter, strategy, selected);
       onImported(result);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Import could not be committed.");
@@ -422,7 +457,37 @@ function DotenvImport({ projectId, environmentId, client, onCancel, onImported }
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
-  return <div className="sheet-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="editor-sheet bulk-sheet" role="dialog" aria-modal="true" aria-label="Import dotenv secrets"><header><div><span className="kicker">Value-free preview</span><h2>Import .env</h2></div><button type="button" aria-label="Close dotenv import" onClick={onCancel}>×</button></header>{preview === null ? <><label>Paste dotenv content<textarea value={source} onChange={(event) => { setSource(event.target.value); setPreview(null); }} rows={12} spellCheck={false} placeholder={'DATABASE_URL="postgres://…"\nREDIS_URL=redis://…'} autoFocus /></label><label className="file-picker"><span>or upload a .env file</span><input type="file" accept=".env,text/plain" onChange={(event) => void loadFile(event.target.files?.[0])} /><strong>{fileName ?? "Choose file"}</strong></label>{error ? <p className="import-error" role="alert">{error}</p> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" disabled={source.trim() === "" || busy} onClick={() => void review()}>{busy ? "Inspecting…" : "Preview import"}</button></footer></> : <><div className="import-summary"><strong>{preview.summary.adds}<span>adds</span></strong><strong>{preview.summary.updates}<span>updates</span></strong><strong className={preview.summary.conflicts > 0 ? "danger" : ""}>{preview.summary.conflicts}<span>conflicts</span></strong></div><div className="import-strategies" role="radiogroup" aria-label="Conflict strategy">{(["skip", "overwrite", "merge"] as const).map((option) => <label key={option}><input type="radio" name="strategy" value={option} checked={strategy === option} onChange={() => setStrategy(option)} /><span><strong>{option === "skip" ? "Skip existing" : option === "overwrite" ? "Overwrite all" : "Select keys"}</strong><small>{option === "skip" ? "Only create new keys" : option === "overwrite" ? "Replace every existing key" : "Choose each add or update"}</small></span></label>)}</div><div className="import-preview-list">{preview.entries.map((entry) => <label key={`${entry.line}-${entry.key}`}><input type="checkbox" checked={strategy !== "merge" || selectedKeys.has(entry.key)} disabled={strategy !== "merge"} onChange={() => toggle(entry.key)} /><code>{entry.key}</code><span className={entry.operation}>{entry.operation}</span><small>line {entry.line}</small></label>)}{preview.conflicts.map((conflict) => <p key={`${conflict.line}-${conflict.code}`}><strong>Conflict · line {conflict.line}</strong>{conflict.message}</p>)}</div>{error ? <p className="import-error" role="alert">{error}</p> : null}<footer><button className="secondary-button" type="button" onClick={() => { setPreview(null); setError(null); }}>Back</button><button className="primary-button" type="button" disabled={busy || preview.conflicts.length > 0 || (strategy === "merge" && selectedKeys.size === 0)} onClick={() => void commit()}>{busy ? "Importing…" : `Commit ${strategy === "merge" ? selectedKeys.size : preview.entries.length} keys`}</button></footer></>}</section></div>;
+  const changeFormat = (next: Format) => {
+    setFormat(next);
+    setPreview(null);
+    setSource("");
+    setFileName(null);
+    setError(null);
+  };
+  return (
+    <div className="sheet-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+      <section className="editor-sheet bulk-sheet" role="dialog" aria-modal="true" aria-label="Import secrets">
+        <header><div><span className="kicker">Value-free preview</span><h2>Import secrets</h2></div><button type="button" aria-label="Close import" onClick={onCancel}>×</button></header>
+        {preview === null ? <>
+          <div className="format-tabs" role="tablist" aria-label="Import format">
+            <button type="button" role="tab" aria-selected={format === "dotenv"} onClick={() => changeFormat("dotenv")}>.env</button>
+            <button type="button" role="tab" aria-selected={format === "json"} onClick={() => changeFormat("json")}>JSON</button>
+          </div>
+          {format === "json" ? <label className="delimiter-field">Nested-key delimiter<input value={delimiter} onChange={(event) => { setDelimiter(event.target.value); setPreview(null); }} maxLength={10} /></label> : null}
+          <label>Paste {format === "dotenv" ? "dotenv" : "JSON"} content<textarea value={source} onChange={(event) => { setSource(event.target.value); setPreview(null); }} rows={12} spellCheck={false} placeholder={format === "dotenv" ? 'DATABASE_URL="postgres://…"\nREDIS_URL=redis://…' : '{\n  "DATABASE": { "HOST": "db.internal", "PORT": 5432 }\n}'} autoFocus /></label>
+          <label className="file-picker"><span>or upload a {format === "dotenv" ? ".env" : ".json"} file</span><input type="file" accept={format === "dotenv" ? ".env,text/plain" : ".json,application/json"} onChange={(event) => void loadFile(event.target.files?.[0])} /><strong>{fileName ?? "Choose file"}</strong></label>
+          {error ? <p className="import-error" role="alert">{error}</p> : null}
+          <footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" disabled={source.trim() === "" || busy || (format === "json" && delimiter === "")} onClick={() => void review()}>{busy ? "Inspecting…" : "Preview import"}</button></footer>
+        </> : <>
+          <div className="import-summary"><strong>{preview.summary.adds}<span>adds</span></strong><strong>{preview.summary.updates}<span>updates</span></strong><strong className={preview.summary.conflicts > 0 ? "danger" : ""}>{preview.summary.conflicts}<span>conflicts</span></strong></div>
+          <div className="import-strategies" role="radiogroup" aria-label="Conflict strategy">{(["skip", "overwrite", "merge"] as const).map((option) => <label key={option}><input type="radio" name="strategy" value={option} checked={strategy === option} onChange={() => setStrategy(option)} /><span><strong>{option === "skip" ? "Skip existing" : option === "overwrite" ? "Overwrite all" : "Select keys"}</strong><small>{option === "skip" ? "Only create new keys" : option === "overwrite" ? "Replace every existing key" : "Choose each add or update"}</small></span></label>)}</div>
+          <div className="import-preview-list">{preview.entries.map((entry) => <label key={`${entry.location}-${entry.key}`}><input type="checkbox" checked={strategy !== "merge" || selectedKeys.has(entry.key)} disabled={strategy !== "merge"} onChange={() => toggle(entry.key)} /><code>{entry.key}</code><span className={entry.operation}>{entry.operation}</span><small>{entry.location}</small></label>)}{preview.conflicts.map((conflict) => <p key={`${conflict.location}-${conflict.code}`}><strong>Conflict · {conflict.location}</strong>{conflict.message}</p>)}</div>
+          {error ? <p className="import-error" role="alert">{error}</p> : null}
+          <footer><button className="secondary-button" type="button" onClick={() => { setPreview(null); setError(null); }}>Back</button><button className="primary-button" type="button" disabled={busy || preview.conflicts.length > 0 || (strategy === "merge" && selectedKeys.size === 0)} onClick={() => void commit()}>{busy ? "Importing…" : `Commit ${strategy === "merge" ? selectedKeys.size : preview.entries.length} keys`}</button></footer>
+        </>}
+      </section>
+    </div>
+  );
 }
 
 function VersionDrawer({ secret, client, onClose }: { secret: SecretView; client: SecretClient; onClose: () => void }): ReactNode {

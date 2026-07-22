@@ -147,3 +147,121 @@ export function buildDotenvPreview(
     summary: { adds, updates, conflicts: parsed.issues.length },
   };
 }
+
+export type JsonImportIssueCode =
+  | "INVALID_JSON"
+  | "ROOT_NOT_OBJECT"
+  | "ARRAY_NOT_SUPPORTED"
+  | "UNSUPPORTED_TYPE"
+  | "INVALID_KEY"
+  | "KEY_COLLISION"
+  | "INVALID_DELIMITER"
+  | "LIMIT_EXCEEDED";
+
+export interface JsonImportEntry {
+  readonly key: string;
+  readonly value: string;
+  readonly path: string;
+}
+
+export interface JsonImportIssue {
+  readonly path: string;
+  readonly code: JsonImportIssueCode;
+  readonly message: string;
+}
+
+export interface JsonImportParseResult {
+  readonly entries: readonly JsonImportEntry[];
+  readonly issues: readonly JsonImportIssue[];
+  readonly delimiter: string;
+}
+
+export interface JsonImportPreview {
+  readonly entries: readonly { readonly key: string; readonly path: string; readonly operation: "add" | "update" }[];
+  readonly conflicts: readonly JsonImportIssue[];
+  readonly summary: { readonly adds: number; readonly updates: number; readonly conflicts: number };
+}
+
+export function parseJsonSecrets(source: string, delimiter = "__"): JsonImportParseResult {
+  const entries: JsonImportEntry[] = [];
+  const issues: JsonImportIssue[] = [];
+  if (delimiter.length < 1 || delimiter.length > 10 || /[\s=\u0000-\u001f\u007f]/u.test(delimiter)) {
+    return {
+      entries,
+      issues: [{ path: "$", code: "INVALID_DELIMITER", message: "Delimiter must be 1-10 visible characters without whitespace or equals" }],
+      delimiter,
+    };
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(source) as unknown;
+  } catch (error) {
+    return {
+      entries,
+      issues: [{ path: "$", code: "INVALID_JSON", message: error instanceof SyntaxError ? error.message : "JSON could not be parsed" }],
+      delimiter,
+    };
+  }
+  if (!isPlainObject(document)) {
+    return {
+      entries,
+      issues: [{ path: "$", code: "ROOT_NOT_OBJECT", message: "JSON import must start with an object" }],
+      delimiter,
+    };
+  }
+  const keys = new Set<string>();
+  const visit = (value: unknown, segments: readonly string[], path: string, depth: number) => {
+    if (depth > 20) { issues.push({ path, code: "LIMIT_EXCEEDED", message: `${path}: nesting exceeds 20 levels` }); return; }
+    if (Array.isArray(value)) { issues.push({ path, code: "ARRAY_NOT_SUPPORTED", message: `${path}: arrays are not supported` }); return; }
+    if (isPlainObject(value)) {
+      for (const [segment, child] of Object.entries(value)) {
+        const childPath = `${path}.${jsonPathSegment(segment)}`;
+        if (segment === "" || /[\s=\u0000-\u001f\u007f]/u.test(segment)) {
+          issues.push({ path: childPath, code: "INVALID_KEY", message: `${childPath}: object keys cannot be empty or contain whitespace, controls, or equals` });
+          continue;
+        }
+        visit(child, [...segments, segment], childPath, depth + 1);
+      }
+      return;
+    }
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      issues.push({ path, code: "UNSUPPORTED_TYPE", message: `${path}: expected a string, number, or boolean` });
+      return;
+    }
+    const key = segments.join(delimiter);
+    if (keys.has(key)) { issues.push({ path, code: "KEY_COLLISION", message: `${path}: flattened key ${key} is duplicated` }); return; }
+    keys.add(key);
+    entries.push({ key, value: typeof value === "string" ? value : String(value), path });
+    if (entries.length > 100) {
+      entries.pop();
+      issues.push({ path, code: "LIMIT_EXCEEDED", message: "JSON imports are limited to 100 values" });
+    }
+  };
+  visit(document, [], "$", 0);
+  return { entries, issues, delimiter };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function jsonPathSegment(segment: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(segment) ? segment : `[${JSON.stringify(segment)}]`;
+}
+
+export function buildJsonImportPreview(
+  parsed: JsonImportParseResult,
+  existingKeys: ReadonlySet<string>,
+): JsonImportPreview {
+  const entries = parsed.entries.map(({ key, path }) => ({
+    key,
+    path,
+    operation: existingKeys.has(key) ? "update" as const : "add" as const,
+  }));
+  const adds = entries.filter(({ operation }) => operation === "add").length;
+  return {
+    entries,
+    conflicts: parsed.issues,
+    summary: { adds, updates: entries.length - adds, conflicts: parsed.issues.length },
+  };
+}

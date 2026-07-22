@@ -63,6 +63,7 @@ export interface SetSecretInput {
 }
 
 export type SecretImportStrategy = "skip" | "overwrite" | "merge";
+export type SecretImportFormat = "dotenv" | "json";
 
 export interface SecretImportResult {
   readonly secrets: readonly SecretMetadata[];
@@ -358,6 +359,7 @@ export class SecretService {
     inputs: readonly SetSecretInput[],
     strategy: SecretImportStrategy,
     selectedKeys: readonly string[] = [],
+    format: SecretImportFormat = "dotenv",
   ): Promise<SecretImportResult> {
     if (inputs.length < 1 || inputs.length > MAX_BULK_ITEMS) {
       throw new SecretError("INVALID_INPUT", `Imports require between 1 and ${MAX_BULK_ITEMS} secrets`);
@@ -407,7 +409,7 @@ export class SecretService {
           actorUserId,
           projectId,
           environmentId,
-          { ...input, key, changeNote: input.changeNote ?? "dotenv import" },
+          { ...input, key, changeNote: input.changeNote ?? `${format} import` },
           true,
           false,
         ));
@@ -417,7 +419,7 @@ export class SecretService {
           transaction,
           actorUserId,
           row,
-          { ...input, changeNote: input.changeNote ?? "dotenv import" },
+          { ...input, changeNote: input.changeNote ?? `${format} import` },
           "secret.updated",
           false,
         ));
@@ -432,7 +434,7 @@ export class SecretService {
       projectId,
       environmentId,
       details: {
-        format: "dotenv",
+        format,
         strategy,
         requested: normalized.length,
         created,

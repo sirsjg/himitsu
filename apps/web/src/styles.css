@@ -257,6 +257,11 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .file-picker:hover { border-color: var(--accent); }
 .file-picker input { position: absolute; width: 1px !important; height: 1px !important; opacity: 0; }
 .file-picker strong { color: var(--accent); font-family: "DM Mono", monospace; font-size: 9px; font-weight: 500; }
+.format-tabs { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+.format-tabs button { height: 34px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-family: "DM Mono", monospace; font-size: 9px; cursor: pointer; }
+.format-tabs button[aria-selected="true"] { color: var(--accent-ink); background: var(--accent); }
+.delimiter-field { display: flex !important; grid-template-columns: none !important; align-items: center; justify-content: space-between; gap: 20px; }
+.delimiter-field input { width: 90px !important; text-align: center; }
 .import-error { margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--line)); border-radius: 5px; color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, transparent); font-size: 9px; }
 .import-summary { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .import-summary strong { display: grid; gap: 3px; padding: 14px; border-right: 1px solid var(--line); font-family: "DM Mono", monospace; font-size: 18px; font-weight: 500; }

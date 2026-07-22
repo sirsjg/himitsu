@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildDotenvPreview, parseDotenv } from "../src/index.js";
+import {
+  buildDotenvPreview,
+  buildJsonImportPreview,
+  parseDotenv,
+  parseJsonSecrets,
+} from "../src/index.js";
 
 test("parses comments, export assignments, empty values, and unquoted inline comments", () => {
   const result = parseDotenv([
@@ -58,4 +63,45 @@ test("builds a value-free add/update/conflict preview", () => {
   ]);
   assert.deepEqual(preview.summary, { adds: 1, updates: 1, conflicts: 1 });
   assert.doesNotMatch(JSON.stringify(preview), /sensitive-value/);
+});
+
+test("flattens nested JSON with a configurable delimiter and stable primitive conversion", () => {
+  const parsed = parseJsonSecrets(JSON.stringify({
+    DATABASE: { HOST: "db.internal", PORT: 5432, TLS: true },
+    EMPTY: "",
+  }), "__");
+
+  assert.deepEqual(parsed.issues, []);
+  assert.deepEqual(parsed.entries, [
+    { key: "DATABASE__HOST", value: "db.internal", path: "$.DATABASE.HOST" },
+    { key: "DATABASE__PORT", value: "5432", path: "$.DATABASE.PORT" },
+    { key: "DATABASE__TLS", value: "true", path: "$.DATABASE.TLS" },
+    { key: "EMPTY", value: "", path: "$.EMPTY" },
+  ]);
+  assert.deepEqual(parseJsonSecrets('{"A":{"B":false}}', ".").entries, [
+    { key: "A.B", value: "false", path: "$.A.B" },
+  ]);
+});
+
+test("reports JSON syntax, root, array, null, delimiter, key, and flattened collision errors", () => {
+  assert.equal(parseJsonSecrets("{").issues[0]?.code, "INVALID_JSON");
+  assert.equal(parseJsonSecrets("[]").issues[0]?.code, "ROOT_NOT_OBJECT");
+  assert.equal(parseJsonSecrets('{"A":[1,2]}').issues[0]?.code, "ARRAY_NOT_SUPPORTED");
+  assert.equal(parseJsonSecrets('{"A":null}').issues[0]?.code, "UNSUPPORTED_TYPE");
+  assert.equal(parseJsonSecrets('{"A":1}', " ").issues[0]?.code, "INVALID_DELIMITER");
+  assert.equal(parseJsonSecrets('{"bad key":1}').issues[0]?.code, "INVALID_KEY");
+  const collision = parseJsonSecrets('{"A__B":"flat","A":{"B":"nested"}}');
+  assert.equal(collision.issues[0]?.code, "KEY_COLLISION");
+});
+
+test("builds a value-free JSON add/update/conflict preview", () => {
+  const parsed = parseJsonSecrets('{"NEW":"new-sensitive","NESTED":{"OLD":"updated-sensitive"},"BAD":[]}');
+  const preview = buildJsonImportPreview(parsed, new Set(["NESTED__OLD"]));
+
+  assert.deepEqual(preview.entries, [
+    { key: "NEW", path: "$.NEW", operation: "add" },
+    { key: "NESTED__OLD", path: "$.NESTED.OLD", operation: "update" },
+  ]);
+  assert.deepEqual(preview.summary, { adds: 1, updates: 1, conflicts: 1 });
+  assert.doesNotMatch(JSON.stringify(preview), /sensitive/);
 });

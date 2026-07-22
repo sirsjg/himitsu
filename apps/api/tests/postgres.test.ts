@@ -451,6 +451,82 @@ test("previews and commits dotenv imports with explicit conflict strategies", as
   assert.equal(protectedPreview.statusCode, 403, protectedPreview.body);
 });
 
+test("previews and commits flat or nested JSON with stable primitive conversion", async () => {
+  const content = JSON.stringify({
+    DATABASE: { HOST: "db.internal", PORT: 5432, TLS: true },
+    CACHE_URL: "redis://json-update",
+  });
+  const preview = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/json/preview`,
+    headers: headers(orgA, memberA),
+    payload: { content, delimiter: "__" },
+  });
+  assert.equal(preview.statusCode, 200, preview.body);
+  assert.deepEqual(preview.json().data.summary, { adds: 3, updates: 1, conflicts: 0 });
+  assert.deepEqual(preview.json().data.entries.map(({ key }: { key: string }) => key), [
+    "DATABASE__HOST", "DATABASE__PORT", "DATABASE__TLS", "CACHE_URL",
+  ]);
+  assert.equal(preview.body.includes("db.internal"), false);
+  assert.equal(preview.body.includes("redis://json-update"), false);
+
+  const arrayPreview = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/json/preview`,
+    headers: headers(orgA, memberA),
+    payload: { content: '{"DATABASE":{"HOSTS":["one","two"]}}' },
+  });
+  assert.equal(arrayPreview.statusCode, 200, arrayPreview.body);
+  assert.equal(arrayPreview.json().data.conflicts[0].code, "ARRAY_NOT_SUPPORTED");
+  assert.equal(arrayPreview.json().data.conflicts[0].path, "$.DATABASE.HOSTS");
+  const rejected = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/json`,
+    headers: headers(orgA, memberA),
+    payload: { content: '{"DATABASE":{"HOSTS":["one","two"]}}', strategy: "overwrite" },
+  });
+  assert.equal(rejected.statusCode, 400, rejected.body);
+  assert.equal(rejected.json().error.code, "JSON_IMPORT_ERROR");
+
+  const imported = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/json`,
+    headers: headers(orgA, memberA),
+    payload: { content, delimiter: "__", strategy: "overwrite" },
+  });
+  assert.equal(imported.statusCode, 200, imported.body);
+  assert.deepEqual(imported.json().data.summary, { requested: 4, created: 3, updated: 1, skipped: 0 });
+
+  const values = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/bulk-get`,
+    headers: headers(orgA, memberA),
+    payload: { keys: ["DATABASE__HOST", "DATABASE__PORT", "DATABASE__TLS", "CACHE_URL"] },
+  });
+  assert.equal(values.statusCode, 200, values.body);
+  assert.deepEqual(values.json().data, {
+    CACHE_URL: "redis://json-update",
+    DATABASE__HOST: "db.internal",
+    DATABASE__PORT: "5432",
+    DATABASE__TLS: "true",
+  });
+
+  const customDelimiter = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/imports/json/preview`,
+    headers: headers(orgA, memberA),
+    payload: { content: '{"NESTED":{"KEY":"value"}}', delimiter: "." },
+  });
+  assert.equal(customDelimiter.statusCode, 200, customDelimiter.body);
+  assert.equal(customDelimiter.json().data.entries[0].key, "NESTED.KEY");
+
+  const auditRows = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{ metadata: Record<string, unknown> }>(
+    "SELECT metadata FROM audit_events WHERE action = 'secret.imported' AND metadata->'details'->>'format' = 'json'",
+  ));
+  assert.equal(auditRows.rowCount, 1);
+  assert.doesNotMatch(JSON.stringify(auditRows.rows), /db\.internal|redis:\/\/json-update/);
+});
+
 test("maps RBAC and tenant isolation failures to non-leaking HTTP errors", async () => {
   const protectedWrite = await app.inject({
     method: "POST",

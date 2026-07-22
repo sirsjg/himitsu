@@ -9,7 +9,12 @@ import {
   type Permission,
 } from "@himitsu/authz";
 import { EnvironmentError, type EnvironmentService } from "@himitsu/environments";
-import { buildDotenvPreview, parseDotenv } from "@himitsu/imports";
+import {
+  buildDotenvPreview,
+  buildJsonImportPreview,
+  parseDotenv,
+  parseJsonSecrets,
+} from "@himitsu/imports";
 import { ProjectError, type ProjectService } from "@himitsu/projects";
 import { SecretError, type SecretService } from "@himitsu/secrets";
 import { TenancyError, type TenantDatabase, type TenantTransaction } from "@himitsu/tenancy";
@@ -226,6 +231,30 @@ const importResultSchema = {
     },
   },
 } as const;
+const jsonIssueSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["path", "code", "message"],
+  properties: { path: { type: "string" }, code: { type: "string" }, message: { type: "string" } },
+} as const;
+const jsonImportPreviewSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["entries", "conflicts", "summary"],
+  properties: {
+    entries: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "path", "operation"],
+        properties: { key: { type: "string" }, path: { type: "string" }, operation: { type: "string", enum: ["add", "update"] } },
+      },
+    },
+    conflicts: { type: "array", items: jsonIssueSchema },
+    summary: dotenvPreviewSchema.properties.summary,
+  },
+} as const;
 const tagSchema = {
   type: "object", additionalProperties: false,
   required: ["id", "name", "color", "createdAt", "updatedAt"],
@@ -270,6 +299,8 @@ export const apiRoutePermissions = Object.freeze({
   listSecretVersions: "secret.read",
   previewDotenvImport: "secret.write",
   commitDotenvImport: "secret.write",
+  previewJsonImport: "secret.write",
+  commitJsonImport: "secret.write",
   listTags: "org.settings.read",
   createTag: "org.settings.update",
   updateTag: "org.settings.update",
@@ -778,7 +809,10 @@ function registerSecretRoutes(
     const selected = requested === undefined
       ? metadata
       : metadata.filter(({ key }) => requested.includes(key));
-    const values = await Promise.all(selected.map(({ id }) => dependencies.secrets.get(transaction, context.userId, id)));
+    const values = [];
+    for (const { id } of selected) {
+      values.push(await dependencies.secrets.get(transaction, context.userId, id));
+    }
     return { data: Object.fromEntries(values.map(({ key, value }) => [key, value])), meta: { count: values.length } };
   }));
   const dotenvBody = {
@@ -828,6 +862,61 @@ function registerSecretRoutes(
       })),
       body.strategy,
       body.selectedKeys ?? [],
+    );
+    return { data: result };
+  }));
+  const jsonBody = {
+    type: "object", additionalProperties: false, required: ["content"],
+    properties: {
+      content: { type: "string", minLength: 1, maxLength: 1_048_576 },
+      delimiter: { type: "string", minLength: 1, maxLength: 10, default: "__" },
+    },
+  } as const;
+  app.post("/api/v1/projects/:projectId/environments/:environmentId/imports/json/preview", {
+    schema: {
+      operationId: "previewJsonImport", tags: ["imports"], params: scopeParams,
+      body: jsonBody, response: apiResponses(jsonImportPreviewSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const projectId = params(request).projectId ?? "";
+    const environmentId = params(request).environmentId ?? "";
+    const body = request.body as { content: string; delimiter?: string };
+    const parsed = parseJsonSecrets(body.content, body.delimiter ?? "__");
+    const existing = await dependencies.secrets.list(transaction, context.userId, projectId, environmentId);
+    return { data: buildJsonImportPreview(parsed, new Set(existing.map(({ key }) => key))) };
+  }));
+  app.post("/api/v1/projects/:projectId/environments/:environmentId/imports/json", {
+    schema: {
+      operationId: "commitJsonImport", tags: ["imports"], params: scopeParams,
+      body: {
+        type: "object", additionalProperties: false, required: ["content", "strategy"],
+        properties: {
+          ...jsonBody.properties,
+          strategy: { type: "string", enum: ["skip", "overwrite", "merge"] },
+          selectedKeys: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string" } },
+        },
+      },
+      response: apiResponses(importResultSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const body = request.body as { content: string; delimiter?: string; strategy: "skip" | "overwrite" | "merge"; selectedKeys?: string[] };
+    const parsed = parseJsonSecrets(body.content, body.delimiter ?? "__");
+    if (parsed.issues.length > 0) {
+      throw new ApiError(400, "JSON_IMPORT_ERROR", "Resolve JSON conflicts before importing", { conflicts: parsed.issues });
+    }
+    const result = await dependencies.secrets.importBatch(
+      transaction,
+      context.userId,
+      params(request).projectId ?? "",
+      params(request).environmentId ?? "",
+      parsed.entries.map(({ key, value }) => ({
+        key,
+        value,
+        ...(!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/.test(key) ? { allowNonConformingKey: true } : {}),
+      })),
+      body.strategy,
+      body.selectedKeys ?? [],
+      "json",
     );
     return { data: result };
   }));
