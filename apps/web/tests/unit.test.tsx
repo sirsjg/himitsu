@@ -8,6 +8,14 @@ import {
   filterCommandItems,
   validateAuthForm,
 } from "../src/App.js";
+import {
+  SecretConflictError,
+  createSecretClient,
+  demoSecretRows,
+  filterSecretRows,
+  isConventionalSecretKey,
+  parseBulkSecrets,
+} from "../src/SecretWorkspace.js";
 
 function renderRoute(path: string): string {
   return renderToStaticMarkup(
@@ -78,4 +86,87 @@ test("invite route renders an actionable acceptance screen", () => {
   assert.match(html, /Your invitation is ready to accept/);
   assert.match(html, /Accept invitation/);
   assert.match(html, /Use a different account/);
+});
+
+test("bulk paste parses dotenv values and reports malformed or duplicate entries", () => {
+  const parsed = parseBulkSecrets([
+    "# service configuration",
+    "DATABASE_URL=postgres://localhost/app",
+    'PRIVATE_KEY="first\\nsecond"',
+    "legacy.key='literal value'",
+    "DATABASE_URL=duplicate",
+    "BROKEN_LINE",
+  ].join("\n"));
+
+  assert.deepEqual(parsed.secrets, [
+    { key: "DATABASE_URL", value: "postgres://localhost/app" },
+    { key: "PRIVATE_KEY", value: "first\nsecond" },
+    { key: "legacy.key", value: "literal value", allowNonConformingKey: true },
+  ]);
+  assert.deepEqual(parsed.errors, [
+    "Line 5: duplicate key DATABASE_URL",
+    "Line 6: expected KEY=value",
+  ]);
+  assert.equal(isConventionalSecretKey("SENTRY_DSN"), true);
+  assert.equal(isConventionalSecretKey("sentry.dsn"), false);
+});
+
+test("secret search combines text terms and tag filters without examining values", () => {
+  assert.deepEqual(
+    filterSecretRows(demoSecretRows, "primary database", "critical").map(({ key }) => key),
+    ["DATABASE_URL"],
+  );
+  assert.deepEqual(
+    filterSecretRows(demoSecretRows, "billing", "third-party").map(({ key }) => key),
+    ["STRIPE_SECRET_KEY"],
+  );
+  assert.deepEqual(filterSecretRows(demoSecretRows, "plaintext-not-indexed", null), []);
+});
+
+test("secret client targets v1 routes, sends optimistic version preconditions, and surfaces conflicts", async () => {
+  const calls: Array<{ input: string; init?: RequestInit }> = [];
+  const metadata = {
+    id: "secret-id",
+    environmentId: "environment-id",
+    key: "DATABASE_URL",
+    notes: null,
+    currentVersion: 4,
+    updatedAt: "2026-07-22T00:00:00.000Z",
+  };
+  const client = createSecretClient(async (input, init) => {
+    calls.push({ input, ...(init === undefined ? {} : { init }) });
+    return new Response(JSON.stringify({ data: metadata }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+
+  await client.update("secret/id", 3, { value: "replacement", changeNote: "rotation" });
+  assert.equal(calls[0]?.input, "/api/v1/secrets/secret%2Fid");
+  assert.equal(calls[0]?.init?.method, "PATCH");
+  assert.equal(new Headers(calls[0]?.init?.headers).get("if-match"), '"3"');
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { value: "replacement", changeNote: "rotation" });
+
+  const conflicting = createSecretClient(async () => new Response(
+    JSON.stringify({ error: { message: "Version is stale" } }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  ));
+  await assert.rejects(() => conflicting.update("secret-id", 2, { value: "replacement" }), (error: unknown) => {
+    assert.ok(error instanceof SecretConflictError);
+    assert.equal(error.message, "Version is stale");
+    return true;
+  });
+});
+
+test("project detail renders environment browsing and masked secret editing controls", () => {
+  const html = renderRoute("/app/projects/project-atlas");
+
+  assert.match(html, /Project vault/);
+  assert.match(html, /Development/);
+  assert.match(html, /Staging/);
+  assert.match(html, /Production/);
+  assert.match(html, /Bulk paste/);
+  assert.match(html, /Add secret/);
+  assert.match(html, /DATABASE_URL/);
+  assert.match(html, /Reveal DATABASE_URL/);
+  assert.match(html, /#database/);
+  assert.match(html, />v7</);
+  assert.doesNotMatch(html, /postgres:\/\//);
 });

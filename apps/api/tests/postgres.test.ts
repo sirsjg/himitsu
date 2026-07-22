@@ -328,11 +328,18 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   assert.equal(created.json().data.currentVersion, 1);
 
   const updated = await app.inject({
-    method: "PATCH", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA),
+    method: "PATCH", url: `/api/v1/secrets/${secretId}`, headers: { ...headers(orgA, memberA), "if-match": '"1"' },
     payload: { value: "postgres://api-second", changeNote: "API rotation" },
   });
   assert.equal(updated.statusCode, 200, updated.body);
   assert.equal(updated.json().data.currentVersion, 2);
+
+  const staleUpdate = await app.inject({
+    method: "PATCH", url: `/api/v1/secrets/${secretId}`, headers: { ...headers(orgA, memberA), "if-match": '"1"' },
+    payload: { value: "postgres://stale-write" },
+  });
+  assert.equal(staleUpdate.statusCode, 409, staleUpdate.body);
+  assert.equal(staleUpdate.json().error.code, "VERSION_CONFLICT");
 
   const bulkSet = await app.inject({
     method: "POST",

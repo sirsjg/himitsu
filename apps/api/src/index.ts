@@ -729,12 +729,23 @@ function registerSecretRoutes(
       body: { type: "object", additionalProperties: false, required: ["value"], properties: { value: { type: "string" }, notes: { type: ["string", "null"], maxLength: 4000 }, changeNote: { type: ["string", "null"], maxLength: 1000 } } },
       response: apiResponses(secretMetadataSchema),
     },
-  }, async (request) => withTenant(request, async (transaction, context) => ({ data: await dependencies.secrets.update(
-    transaction,
-    context.userId,
-    params(request).secretId ?? "",
-    request.body as Parameters<SecretService["update"]>[3],
-  ) })));
+  }, async (request) => {
+    const header = request.headers["if-match"];
+    const match = typeof header === "string" ? /^(?:W\/)?\"?(\d+)\"?$/.exec(header.trim()) : null;
+    if (header !== undefined && match?.[1] === undefined) {
+      throw new ApiError(400, "INVALID_IF_MATCH", "If-Match must contain a numeric secret version");
+    }
+    const expectedVersion = match?.[1] === undefined ? undefined : Number(match[1]);
+    return withTenant(request, async (transaction, context) => ({ data: await dependencies.secrets.update(
+      transaction,
+      context.userId,
+      params(request).secretId ?? "",
+      {
+        ...(request.body as Parameters<SecretService["update"]>[3]),
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      },
+    ) }));
+  });
   app.delete("/api/v1/secrets/:secretId", {
     schema: { operationId: "deleteSecret", tags: ["secrets"], params: secretParams, response: apiResponses(secretMetadataSchema) },
   }, async (request) => withTenant(request, async (transaction, context) => ({ data: await dependencies.secrets.delete(
@@ -1033,7 +1044,7 @@ function mapError(error: unknown): ApiError {
   }
   if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError) {
     if (error.code === "NOT_FOUND") return new ApiError(404, "NOT_FOUND", error.message);
-    if (error.code.endsWith("EXISTS")) return new ApiError(409, error.code, error.message);
+    if (error.code.endsWith("EXISTS") || error.code === "VERSION_CONFLICT") return new ApiError(409, error.code, error.message);
     return new ApiError(400, error.code, error.message);
   }
   if (error instanceof ApiKeyError) {

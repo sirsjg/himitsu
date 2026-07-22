@@ -16,6 +16,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import { SecretWorkspace } from "./SecretWorkspace.js";
 
 export interface OrganizationOption {
   readonly id: string;
@@ -271,7 +272,7 @@ function ProjectLanding({ projects }: { projects: readonly ProjectQuickLink[] })
   const { projectId } = useParams();
   const project = projects.find(({ id }) => id === projectId);
   if (project === undefined) return <SectionPage eyebrow="Project" title="Project not found" copy="This project is not available in the active organization." />;
-  return <SectionPage eyebrow="Project overview" title={project.name} copy={`${project.secrets.length} indexed keys across development, staging, and production.`} />;
+  return <SecretWorkspace projectId={project.id} projectName={project.name} />;
 }
 
 function SectionPage({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }): ReactNode {

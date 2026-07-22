@@ -132,6 +132,20 @@ test("updates values immutably and enforces key, value, and uniqueness validatio
     );
     assert.deepEqual(versions.rows.map(({ version }) => version), [1, 2]);
     assert.notDeepEqual(versions.rows[0]?.ciphertext, versions.rows[1]?.ciphertext);
+    await assert.rejects(
+      secrets.update(transaction, memberA, databaseSecretId, {
+        value: "stale concurrent update",
+        expectedVersion: 1,
+      }),
+      (error: unknown) => error instanceof SecretError && error.code === "VERSION_CONFLICT",
+    );
+    assert.equal(
+      (await transaction.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM secret_versions WHERE secret_id = $1",
+        [databaseSecretId],
+      )).rows[0]?.count,
+      2,
+    );
   });
 
   await assert.rejects(

@@ -19,6 +19,7 @@ export class SecretError extends Error {
     | "KEY_CONVENTION"
     | "VALUE_TOO_LARGE"
     | "KEY_EXISTS"
+    | "VERSION_CONFLICT"
     | "NOT_FOUND";
 
   constructor(code: SecretError["code"], message: string) {
@@ -267,7 +268,7 @@ export class SecretService {
     transaction: TenantTransaction,
     actorUserId: string,
     secretId: string,
-    input: { value: string; notes?: string | null; changeNote?: string | null },
+    input: { value: string; notes?: string | null; changeNote?: string | null; expectedVersion?: number },
   ): Promise<SecretMetadata> {
     const before = await this.#metadataRow(transaction, secretId, true);
     const environment = await this.#environment(transaction, before.project_id, before.environment_id);
@@ -280,6 +281,12 @@ export class SecretService {
       ),
       "secret.write",
     );
+    if (input.expectedVersion !== undefined && input.expectedVersion !== before.current_version) {
+      throw new SecretError(
+        "VERSION_CONFLICT",
+        `Secret is at version ${before.current_version}; refresh before replacing version ${input.expectedVersion}`,
+      );
+    }
     return this.#writeVersion(transaction, actorUserId, before, input, "secret.updated");
   }
 
