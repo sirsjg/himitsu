@@ -8,6 +8,7 @@ import {
   requirePermission,
   type Permission,
 } from "@himitsu/authz";
+import { ConsistencyError, type ConsistencyService } from "@himitsu/consistency";
 import { EnvironmentError, type EnvironmentService } from "@himitsu/environments";
 import {
   buildDotenvPreview,
@@ -46,6 +47,7 @@ export interface ApiDependencies {
   readonly projects: ProjectService;
   readonly environments: EnvironmentService;
   readonly secrets: SecretService;
+  readonly consistency: ConsistencyService;
   readonly rateLimits?: ApiRateLimitOptions;
 }
 
@@ -288,6 +290,47 @@ const createdApiKeySchema = {
   properties: { apiKey: apiKeySchema, token: { type: "string", pattern: "^himi_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$" } },
 } as const;
 const stringMapSchema = { type: "object", additionalProperties: { type: "string" } } as const;
+const consistencyFindingSchema = {
+  type: "object", additionalProperties: false,
+  required: ["id", "type", "severity", "key", "keys", "environmentIds", "missingEnvironmentIds", "disposition", "dispositionNote", "dispositionUpdatedAt"],
+  properties: {
+    id: { type: "string" },
+    type: { type: "string", enum: ["missing_key", "empty_value", "placeholder_value", "naming_violation", "case_duplicate"] },
+    severity: { type: "string", enum: ["warning", "error"] },
+    key: { type: "string" },
+    keys: { type: "array", items: { type: "string" } },
+    environmentIds: { type: "array", items: uuid },
+    missingEnvironmentIds: { type: "array", items: uuid },
+    disposition: { type: ["string", "null"], enum: ["acknowledged", "ignored", null] },
+    dispositionNote: { type: ["string", "null"] },
+    dispositionUpdatedAt: nullableDateTime,
+  },
+} as const;
+const consistencyReportSchema = {
+  type: "object", additionalProperties: false,
+  required: ["projectId", "sourceFingerprint", "computedAt", "cached", "environments", "matrix", "findings", "counts", "summary"],
+  properties: {
+    projectId: uuid,
+    sourceFingerprint: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    computedAt: dateTime,
+    cached: { type: "boolean" },
+    environments: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "slug"], properties: { id: uuid, slug: { type: "string" } } } },
+    matrix: { type: "array", items: {
+      type: "object", additionalProperties: false, required: ["key", "keys", "cells"],
+      properties: {
+        key: { type: "string" }, keys: { type: "array", items: { type: "string" } },
+        cells: { type: "array", items: { type: "object", additionalProperties: false, required: ["environmentId", "state", "secretId"], properties: {
+          environmentId: uuid, state: { type: "string", enum: ["present", "missing", "empty"] }, secretId: nullableUuid,
+        } } },
+      },
+    } },
+    findings: { type: "array", items: consistencyFindingSchema },
+    counts: { type: "object", additionalProperties: false, required: ["error", "warning"], properties: { error: { type: "integer" }, warning: { type: "integer" } } },
+    summary: { type: "object", additionalProperties: false, required: ["healthy", "exitCode", "totalFindings", "activeFindings", "errors", "warnings"], properties: {
+      healthy: { type: "boolean" }, exitCode: { type: "integer", enum: [0, 1] }, totalFindings: { type: "integer" }, activeFindings: { type: "integer" }, errors: { type: "integer" }, warnings: { type: "integer" },
+    } },
+  },
+} as const;
 
 export const apiRoutePermissions = Object.freeze({
   listProjects: "project.read",
@@ -295,6 +338,7 @@ export const apiRoutePermissions = Object.freeze({
   getProject: "project.read",
   updateProject: "project.update",
   deleteProject: "project.delete",
+  getProjectConsistency: "secret.read",
   listEnvironments: "environment.read",
   createEnvironment: "environment.create",
   reorderEnvironments: "environment.update",
@@ -533,6 +577,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
         { name: "secrets" },
         { name: "versions" },
         { name: "imports" },
+        { name: "consistency" },
         { name: "tags" },
         { name: "api-keys" },
       ],
@@ -657,6 +702,21 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     schema: { operationId: "deleteProject", tags: ["projects"], params: idParams({ projectId: uuid }), response: apiResponses(projectSchema) },
   }, async (request) => withTenant(request, async (transaction, context) => ({
     data: await dependencies.projects.delete(transaction, context.userId, params(request).projectId ?? ""),
+  })));
+
+  app.get("/api/v1/projects/:projectId/consistency", {
+    schema: {
+      operationId: "getProjectConsistency",
+      tags: ["consistency"],
+      params: idParams({ projectId: uuid }),
+      response: apiResponses(consistencyReportSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => ({
+    data: await dependencies.consistency.compute(
+      transaction,
+      context.userId,
+      params(request).projectId ?? "",
+    ),
   })));
 
   registerEnvironmentRoutes(app, dependencies, withTenant);
@@ -1300,7 +1360,7 @@ function mapError(error: unknown): ApiError {
     if (error.code === "RATE_LIMITED") return new ApiError(429, "RATE_LIMITED", "Too many authentication attempts");
     return new ApiError(401, "UNAUTHENTICATED", "Session is invalid or expired");
   }
-  if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError) {
+  if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError || error instanceof ConsistencyError) {
     if (error.code === "NOT_FOUND" || error.code === "VERSION_NOT_FOUND") return new ApiError(404, error.code, error.message);
     if (error.code.endsWith("EXISTS") || error.code === "VERSION_CONFLICT") return new ApiError(409, error.code, error.message);
     return new ApiError(400, error.code, error.message);

@@ -6,6 +6,7 @@ import { ApiKeyService } from "@himitsu/api-keys";
 import { AuthService, sessionCookie } from "@himitsu/auth";
 import { AuthorizationContextResolver } from "@himitsu/authz";
 import { LocalMasterKey } from "@himitsu/crypto";
+import { ConsistencyService } from "@himitsu/consistency";
 import { EnvironmentService } from "@himitsu/environments";
 import { ProjectService } from "@himitsu/projects";
 import { SecretService } from "@himitsu/secrets";
@@ -50,6 +51,7 @@ const secrets = new SecretService(
   audit,
   new LocalMasterKey("api-integration-v1", Buffer.alloc(32, 9)),
 );
+const consistency = new ConsistencyService(resolver, secrets, audit);
 const app = await buildApi({
   database,
   auth,
@@ -58,6 +60,7 @@ const app = await buildApi({
   projects,
   environments,
   secrets,
+  consistency,
   rateLimits: { perIp: 1_000, perApiKey: 100 },
 });
 
@@ -141,6 +144,7 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
   for (const path of [
     "/api/v1/projects",
     "/api/v1/projects/{projectId}/environments",
+    "/api/v1/projects/{projectId}/consistency",
     "/api/v1/projects/{projectId}/environments/{environmentId}/secrets/bulk-get",
     "/api/v1/secrets/{secretId}/versions",
     "/api/v1/tags",
@@ -410,6 +414,39 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   const missing = await app.inject({ method: "GET", url: `/api/v1/secrets/${secretId}`, headers: headers(orgA, memberA) });
   assert.equal(missing.statusCode, 404);
   assert.equal(missing.json().error.code, "NOT_FOUND");
+});
+
+test("returns a value-free consistency matrix and exit-code-friendly summary", async () => {
+  const empty = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: headers(orgA, memberA),
+    payload: { key: "EMPTY_FOR_CHECK", value: "" },
+  });
+  assert.equal(empty.statusCode, 201, empty.body);
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/consistency`,
+    headers: headers(orgA, readerA),
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().data.summary.healthy, false);
+  assert.equal(response.json().data.summary.exitCode, 1);
+  assert.ok(response.json().data.summary.activeFindings > 0);
+  assert.equal(response.json().data.environments.length, 4);
+  const row = response.json().data.matrix.find(({ key }: { key: string }) => key === "EMPTY_FOR_CHECK");
+  assert.ok(row);
+  assert.equal(row.cells.find(({ environmentId }: { environmentId: string }) => environmentId === developmentId).state, "empty");
+  assert.equal(row.cells.filter(({ state }: { state: string }) => state === "missing").length, 3);
+  assert.doesNotMatch(response.body, /postgres:\/\/api|first-import-value|dotenv-update/);
+
+  const otherTenant = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/consistency`,
+    headers: headers(orgB, ownerB),
+  });
+  assert.equal(otherTenant.statusCode, 404, otherTenant.body);
 });
 
 test("previews and commits dotenv imports with explicit conflict strategies", async () => {
@@ -710,7 +747,7 @@ test("manages scoped API keys while revealing token material only at creation", 
   });
 
   const limitedApp = await buildApi({
-    database, auth, apiKeys, audit, projects, environments, secrets,
+    database, auth, apiKeys, audit, projects, environments, secrets, consistency,
     rateLimits: { perIp: 100, perApiKey: 1 },
   });
   const firstLimited = await limitedApp.inject({

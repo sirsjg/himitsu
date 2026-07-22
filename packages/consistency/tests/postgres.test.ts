@@ -119,6 +119,18 @@ test("detects every drift class with severity and no plaintext findings", async 
   const encoded = JSON.stringify(report.findings);
   assert.doesNotMatch(encoded, /postgres:\/\/|changeme|replace-me|configured/);
   assert.equal(report.findings.every(({ disposition }) => disposition === null), true);
+  assert.equal(report.environments.length, 3);
+  assert.equal(report.summary.healthy, false);
+  assert.equal(report.summary.exitCode, 1);
+  assert.equal(report.summary.activeFindings, report.findings.length);
+  const emptyRow = report.matrix.find(({ key }) => key === "EMPTY_VALUE");
+  assert.ok(emptyRow);
+  assert.equal(emptyRow.cells.find(({ environmentId }) => environmentId === developmentId)?.state, "empty");
+  assert.equal(emptyRow.cells.find(({ environmentId }) => environmentId === stagingId)?.state, "present");
+  assert.equal(emptyRow.cells.find(({ environmentId }) => environmentId === productionId)?.state, "present");
+  const stagingOnly = report.matrix.find(({ key }) => key === "ONLY_STAGING");
+  assert.equal(stagingOnly?.cells.filter(({ state }) => state === "missing").length, 2);
+  assert.doesNotMatch(JSON.stringify(report.matrix), /postgres:\/\/|changeme|replace-me|configured/);
 });
 
 test("reuses cache until a source version changes and never caches plaintext", async () => {

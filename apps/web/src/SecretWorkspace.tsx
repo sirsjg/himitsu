@@ -44,6 +44,29 @@ export interface SecretVersionComparisonView {
   readonly toValue?: string;
 }
 
+export interface ConsistencyReportView {
+  readonly computedAt: string;
+  readonly cached: boolean;
+  readonly environments: readonly { readonly id: string; readonly slug: string }[];
+  readonly matrix: readonly {
+    readonly key: string;
+    readonly keys: readonly string[];
+    readonly cells: readonly {
+      readonly environmentId: string;
+      readonly state: "present" | "missing" | "empty";
+      readonly secretId: string | null;
+    }[];
+  }[];
+  readonly summary: {
+    readonly healthy: boolean;
+    readonly exitCode: 0 | 1;
+    readonly totalFindings: number;
+    readonly activeFindings: number;
+    readonly errors: number;
+    readonly warnings: number;
+  };
+}
+
 export interface BulkSecretInput {
   readonly key: string;
   readonly value: string;
@@ -107,6 +130,7 @@ export interface SecretClient {
   versions(secretId: string): Promise<readonly SecretVersionView[]>;
   compareVersions(secretId: string, fromVersion: number, toVersion: number, reveal?: boolean): Promise<SecretVersionComparisonView>;
   rollbackVersion(secretId: string, targetVersion: number, expectedVersion: number): Promise<ApiSecretMetadata>;
+  consistency(projectId: string): Promise<ConsistencyReportView>;
 }
 
 export function isConventionalSecretKey(key: string): boolean {
@@ -179,6 +203,7 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
     versions: (secretId) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions?limit=100`),
     compareVersions: (secretId, fromVersion, toVersion, reveal = false) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/compare?from=${fromVersion}&to=${toVersion}${reveal ? "&reveal=true" : ""}`),
     rollbackVersion: (secretId, targetVersion, expectedVersion) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/${targetVersion}/rollback`, { method: "POST", body: JSON.stringify({ expectedVersion, changeNote: `Rollback to version ${targetVersion}` }) }),
+    consistency: (projectId) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/consistency`),
   };
 }
 
@@ -198,6 +223,21 @@ export const demoSecretRows: readonly SecretView[] = [
   { id: "cc90e201-4078-41d6-bc53-c295f47cc79b", environmentId: "staging", key: "DATABASE_URL", notes: "Staging database", currentVersion: 5, updatedAt: "2026-07-21T03:10:00.000Z", tags: ["database", "critical"] },
   { id: "e25be465-45ca-4ca9-b1f8-d80186bc2cea", environmentId: "production", key: "DATABASE_URL", notes: "Production database", currentVersion: 11, updatedAt: "2026-07-22T01:05:00.000Z", tags: ["database", "critical"] },
 ];
+
+export const demoConsistencyReport: ConsistencyReportView = {
+  computedAt: "2026-07-22T00:00:00.000Z",
+  cached: true,
+  environments: demoEnvironments.map(({ id, slug }) => ({ id, slug })),
+  matrix: ["DATABASE_URL", "STRIPE_SECRET_KEY", "REDIS_URL", "SENTRY_DSN"].map((key) => ({
+    key,
+    keys: [key],
+    cells: demoEnvironments.map(({ id }) => {
+      const secret = demoSecretRows.find((candidate) => candidate.environmentId === id && candidate.key === key);
+      return { environmentId: id, state: secret === undefined ? "missing" as const : "present" as const, secretId: secret?.id ?? null };
+    }),
+  })),
+  summary: { healthy: false, exitCode: 1, totalFindings: 3, activeFindings: 3, errors: 3, warnings: 0 },
+};
 
 function metadataToView(metadata: ApiSecretMetadata, tags: readonly string[] = []): SecretView {
   return { ...metadata, tags };
@@ -220,11 +260,13 @@ export function SecretWorkspace({
   const [secrets, setSecrets] = useState<readonly SecretView[]>(initialSecrets);
   const [query, setQuery] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
-  const [editor, setEditor] = useState<{ mode: "add" | "edit"; secret?: SecretView } | null>(null);
+  const [editor, setEditor] = useState<{ mode: "add" | "edit"; secret?: SecretView; initialKey?: string } | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [historySecret, setHistorySecret] = useState<SecretView | null>(null);
   const [revealed, setRevealed] = useState<Readonly<Record<string, string>>>({});
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [health, setHealth] = useState<ConsistencyReportView | null>(projectId.startsWith("project-") ? demoConsistencyReport : null);
+  const [healthError, setHealthError] = useState<string | null>(null);
   const remaskTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const environment = environments.find(({ id }) => id === activeEnvironmentId) ?? environments[0];
   const environmentSecrets = secrets.filter(({ environmentId }) => environmentId === activeEnvironmentId);
@@ -233,6 +275,14 @@ export function SecretWorkspace({
     () => filterSecretRows(environmentSecrets, query, activeTag),
     [environmentSecrets, query, activeTag],
   );
+
+  const refreshHealth = async () => {
+    if (projectId.startsWith("project-")) return;
+    try { setHealth(await client.consistency(projectId)); setHealthError(null); }
+    catch (reason) { setHealthError(reason instanceof Error ? reason.message : "Project health could not be loaded."); }
+  };
+
+  useEffect(() => { void refreshHealth(); }, [client, projectId]);
 
   useEffect(() => () => {
     for (const timer of remaskTimers.current.values()) clearTimeout(timer);
@@ -301,6 +351,7 @@ export function SecretWorkspace({
         });
         setSecrets((current) => current.map((row) => row.id === before.id ? metadataToView(saved, before.tags) : row));
         setNotice({ kind: "success", message: `${before.key} updated.` });
+        void refreshHealth();
       } catch (error) {
         const message = error instanceof SecretConflictError ? error.message : error instanceof Error ? error.message : "Update failed.";
         setSecrets((current) => current.map((row) => row.id === before.id ? { ...before, conflict: message } : row));
@@ -316,6 +367,7 @@ export function SecretWorkspace({
       const saved = await client.create(projectId, environment.id, { key: values.key, value: values.value, notes: values.notes || null, ...(values.allowNonConformingKey ? { allowNonConformingKey: true } : {}) });
       setSecrets((current) => current.map((row) => row.id === temporaryId ? metadataToView(saved) : row));
       setNotice({ kind: "success", message: `${saved.key} created.` });
+      void refreshHealth();
     } catch (error) {
       setSecrets((current) => current.filter(({ id }) => id !== temporaryId));
       setNotice({ kind: "error", message: error instanceof Error ? error.message : "Secret could not be created." });
@@ -336,6 +388,7 @@ export function SecretWorkspace({
     });
     setBulkOpen(false);
     setNotice({ kind: "success", message: `Import complete: ${result.summary.created} added, ${result.summary.updated} updated, ${result.summary.skipped} skipped.` });
+    void refreshHealth();
   };
 
   const finishRollback = (saved: ApiSecretMetadata) => {
@@ -344,6 +397,14 @@ export function SecretWorkspace({
     setSecrets((current) => current.map((row) => row.id === saved.id ? view : row));
     setHistorySecret(view);
     setNotice({ kind: "success", message: `${saved.key} rolled back as new version ${saved.currentVersion}.` });
+    void refreshHealth();
+  };
+
+  const fixHealthCell = (key: string, cell: ConsistencyReportView["matrix"][number]["cells"][number]) => {
+    setActiveEnvironmentId(cell.environmentId);
+    setActiveTag(null);
+    const secret = cell.secretId === null ? undefined : secrets.find(({ id }) => id === cell.secretId);
+    setEditor(secret === undefined ? { mode: "add", initialKey: key } : { mode: "edit", secret });
   };
 
   return (
@@ -356,6 +417,7 @@ export function SecretWorkspace({
         <div><span className="kicker">Project vault</span><h1>{projectName}</h1><p>Reveal only what you need. Values automatically return to a masked state after 15 seconds.</p></div>
         <div className="secret-actions"><button className="secondary-button" type="button" onClick={() => setBulkOpen(true)}>Bulk paste</button><button className="primary-button" type="button" onClick={() => setEditor({ mode: "add" })}>＋ Add secret</button></div>
       </section>
+      <ConsistencyHealthPanel report={health} environments={environments} error={healthError} onFix={fixHealthCell} onRefresh={() => void refreshHealth()} />
       <nav className="environment-tabs" aria-label="Project environments">
         {environments.map((item) => <button key={item.id} type="button" className={item.id === activeEnvironmentId ? "active" : ""} onClick={() => { setActiveEnvironmentId(item.id); setActiveTag(null); }}><span>{item.name}</span><small>{secrets.filter(({ environmentId }) => environmentId === item.id).length}</small>{item.protected ? <b title="Protected environment">◆</b> : null}</button>)}
       </nav>
@@ -366,7 +428,7 @@ export function SecretWorkspace({
           <span className="row-count">{visibleSecrets.length} / {environmentSecrets.length}</span>
         </header>
         {notice ? <p className={`workspace-notice ${notice.kind}`} role="status">{notice.message}<button type="button" aria-label="Dismiss notification" onClick={() => setNotice(null)}>×</button></p> : null}
-        {editor ? <SecretEditor mode={editor.mode} {...(editor.secret === undefined ? {} : { secret: editor.secret })} onCancel={() => setEditor(null)} onSave={save} /> : null}
+        {editor ? <SecretEditor mode={editor.mode} {...(editor.secret === undefined ? {} : { secret: editor.secret })} {...(editor.initialKey === undefined ? {} : { initialKey: editor.initialKey })} onCancel={() => setEditor(null)} onSave={save} /> : null}
         <div className="secret-table" role="table" aria-label={`${environment?.name ?? "Environment"} secrets`}>
           <div className="secret-table-head" role="row"><span role="columnheader">Key</span><span role="columnheader">Encrypted value</span><span role="columnheader">Tags</span><span role="columnheader">Version</span><span role="columnheader" className="sr-only">Actions</span></div>
           {visibleSecrets.map((secret) => (
@@ -388,13 +450,34 @@ export function SecretWorkspace({
   );
 }
 
-function SecretEditor({ mode, secret, onCancel, onSave }: {
+function ConsistencyHealthPanel({ report, environments, error, onFix, onRefresh }: {
+  report: ConsistencyReportView | null;
+  environments: readonly EnvironmentView[];
+  error: string | null;
+  onFix: (key: string, cell: ConsistencyReportView["matrix"][number]["cells"][number]) => void;
+  onRefresh: () => void;
+}): ReactNode {
+  const environmentById = new Map(environments.map((environment) => [environment.id, environment]));
+  return <section className="health-panel" aria-label="Project consistency health">
+    <header><div><span className="kicker">Consistency check</span><h2>{report?.summary.healthy ? "Environments aligned" : "Configuration drift"}</h2></div><div className="health-summary"><strong>{report?.summary.activeFindings ?? "—"}<span>active findings</span></strong><strong>{report?.summary.exitCode ?? "—"}<span>CI exit code</span></strong><button type="button" onClick={onRefresh}>Refresh</button></div></header>
+    {error ? <p className="health-error" role="alert">{error}</p> : null}
+    {report === null && error === null ? <p className="health-loading">Computing value-safe matrix…</p> : null}
+    {report ? <div className="health-matrix" role="table" aria-label="Key by environment consistency matrix">
+      <div className="health-matrix-row health-matrix-head" role="row" style={{ gridTemplateColumns: `minmax(190px, 1.4fr) repeat(${report.environments.length}, minmax(130px, 1fr))` }}><span role="columnheader">Key</span>{report.environments.map(({ id, slug }) => <span role="columnheader" key={id}>{environmentById.get(id)?.name ?? slug}</span>)}</div>
+      {report.matrix.map((row) => <div className="health-matrix-row" role="row" key={row.key} style={{ gridTemplateColumns: `minmax(190px, 1.4fr) repeat(${report.environments.length}, minmax(130px, 1fr))` }}><code role="cell">{row.key}</code>{row.cells.map((cell) => <div role="cell" key={cell.environmentId} className={`health-cell ${cell.state}`}><span>{cell.state}</span>{cell.state !== "present" ? <button type="button" onClick={() => onFix(row.key, cell)}>{cell.state === "missing" ? "Add" : "Fix"}</button> : null}</div>)}</div>)}
+    </div> : null}
+    {report ? <footer><span>{report.summary.errors} errors · {report.summary.warnings} warnings</span><span>Values are never included in this report</span></footer> : null}
+  </section>;
+}
+
+function SecretEditor({ mode, secret, initialKey, onCancel, onSave }: {
   mode: "add" | "edit";
   secret?: SecretView;
+  initialKey?: string;
   onCancel: () => void;
   onSave: (values: { key: string; value: string; notes: string; allowNonConformingKey: boolean; changeNote: string }) => Promise<void>;
 }): ReactNode {
-  const [key, setKey] = useState(secret?.key ?? "");
+  const [key, setKey] = useState(secret?.key ?? initialKey ?? "");
   const [allowNonConformingKey, setAllowNonConformingKey] = useState(false);
   const conventional = isConventionalSecretKey(key);
   const submit = (event: FormEvent<HTMLFormElement>) => {

@@ -55,8 +55,32 @@ export interface ConsistencyReport {
   readonly sourceFingerprint: string;
   readonly computedAt: Date;
   readonly cached: boolean;
+  readonly environments: readonly ConsistencyEnvironment[];
+  readonly matrix: readonly ConsistencyMatrixRow[];
   readonly findings: readonly ConsistencyFinding[];
   readonly counts: Readonly<Record<FindingSeverity, number>>;
+  readonly summary: ConsistencySummary;
+}
+
+export interface ConsistencyMatrixCell {
+  readonly environmentId: string;
+  readonly state: "present" | "missing" | "empty";
+  readonly secretId: string | null;
+}
+
+export interface ConsistencyMatrixRow {
+  readonly key: string;
+  readonly keys: readonly string[];
+  readonly cells: readonly ConsistencyMatrixCell[];
+}
+
+export interface ConsistencySummary {
+  readonly healthy: boolean;
+  readonly exitCode: 0 | 1;
+  readonly totalFindings: number;
+  readonly activeFindings: number;
+  readonly errors: number;
+  readonly warnings: number;
 }
 
 interface EnvironmentRow {
@@ -237,6 +261,8 @@ export class ConsistencyService {
         cachedRow.computed_at,
         true,
         parseFindings(cachedRow.findings),
+        environmentResult.rows,
+        secretResult.rows,
       );
     }
     const values: ConsistencySecretValue[] = [];
@@ -273,6 +299,8 @@ export class ConsistencyService {
       stored.rows[0]?.computed_at ?? computedAt,
       false,
       findings,
+      environmentResult.rows,
+      secretResult.rows,
     );
   }
 
@@ -340,6 +368,8 @@ export class ConsistencyService {
     computedAt: Date,
     cached: boolean,
     findings: readonly BaseFinding[],
+    environments: readonly EnvironmentRow[],
+    secrets: readonly SecretRow[],
   ): Promise<ConsistencyReport> {
     const states = await transaction.query<StateRow>(
       `SELECT finding_id, disposition, note, updated_at
@@ -351,18 +381,69 @@ export class ConsistencyService {
       const state = stateById.get(finding.id);
       return state === undefined ? withoutState(finding) : withState(finding, state);
     });
+    const active = merged.filter(({ disposition }) => disposition !== "ignored");
+    const errors = active.filter(({ severity }) => severity === "error").length;
+    const warnings = active.filter(({ severity }) => severity === "warning").length;
     return {
       projectId,
       sourceFingerprint: fingerprint,
       computedAt,
       cached,
+      environments: environments.map(({ id, slug }) => ({ id, slug })),
+      matrix: buildMatrix(environments, secrets, merged),
       findings: merged,
       counts: {
         error: merged.filter(({ severity }) => severity === "error").length,
         warning: merged.filter(({ severity }) => severity === "warning").length,
       },
+      summary: {
+        healthy: active.length === 0,
+        exitCode: active.length === 0 ? 0 : 1,
+        totalFindings: merged.length,
+        activeFindings: active.length,
+        errors,
+        warnings,
+      },
     };
   }
+}
+
+function buildMatrix(
+  environments: readonly EnvironmentRow[],
+  secrets: readonly SecretRow[],
+  findings: readonly ConsistencyFinding[],
+): readonly ConsistencyMatrixRow[] {
+  const environmentIds = environments.map(({ id }) => id);
+  const emptyCells = new Set(findings
+    .filter(({ type }) => type === "empty_value")
+    .flatMap(({ key, environmentIds: affected }) => affected.map((environmentId) => `${key.toUpperCase()}\u0000${environmentId}`)));
+  const byKey = new Map<string, SecretRow[]>();
+  for (const secret of secrets) {
+    const normalized = secret.key.toUpperCase();
+    const matches = byKey.get(normalized) ?? [];
+    matches.push(secret);
+    byKey.set(normalized, matches);
+  }
+  return [...byKey.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([normalized, matches]) => {
+      const keys = [...new Set(matches.map(({ key }) => key))].sort();
+      return {
+        key: keys.length === 1 ? keys[0] ?? normalized : normalized,
+        keys,
+        cells: environmentIds.map((environmentId) => {
+          const secret = matches
+            .filter(({ environment_id: candidate }) => candidate === environmentId)
+            .sort(({ key: left }, { key: right }) => left.localeCompare(right))[0];
+          if (secret === undefined) return { environmentId, state: "missing" as const, secretId: null };
+          return {
+            environmentId,
+            state: emptyCells.has(`${secret.key.toUpperCase()}\u0000${environmentId}`) ? "empty" as const : "present" as const,
+            secretId: secret.id,
+          };
+        }),
+      };
+    });
 }
 
 function sourceFingerprint(environments: readonly EnvironmentRow[], secrets: readonly SecretRow[]): string {

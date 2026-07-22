@@ -185,11 +185,33 @@ test("project detail renders environment browsing and masked secret editing cont
   assert.match(html, /Production/);
   assert.match(html, /Bulk paste/);
   assert.match(html, /Add secret/);
+  assert.match(html, /Project consistency health/);
+  assert.match(html, /Configuration drift/);
+  assert.match(html, /CI exit code/);
+  assert.match(html, /STRIPE_SECRET_KEY/);
+  assert.match(html, />missing</);
   assert.match(html, /DATABASE_URL/);
   assert.match(html, /Reveal DATABASE_URL/);
   assert.match(html, /#database/);
   assert.match(html, />v7</);
   assert.doesNotMatch(html, /postgres:\/\//);
+});
+
+test("consistency client targets the CI-friendly project report endpoint", async () => {
+  const calls: string[] = [];
+  const report = {
+    computedAt: "2026-07-22T00:00:00.000Z",
+    cached: false,
+    environments: [],
+    matrix: [],
+    summary: { healthy: true, exitCode: 0, totalFindings: 0, activeFindings: 0, errors: 0, warnings: 0 },
+  };
+  const client = createSecretClient(async (input) => {
+    calls.push(input);
+    return new Response(JSON.stringify({ data: report }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  assert.deepEqual(await client.consistency("project/id"), report);
+  assert.deepEqual(calls, ["/api/v1/projects/project%2Fid/consistency"]);
 });
 
 test("version client compares masked or revealed history and rolls back with a precondition", async () => {

@@ -174,6 +174,31 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .secondary-button { height: 43px; padding: 0 16px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink); background: var(--surface); font-size: 11px; font-weight: 650; cursor: pointer; }
 .secondary-button:hover { border-color: var(--accent); }
 .secondary-button:disabled, .primary-button:disabled { opacity: .45; cursor: not-allowed; }
+.health-panel { display: grid; gap: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.health-panel > header { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 17px; border-bottom: 1px solid var(--line); }
+.health-panel h2 { margin: 4px 0 0; font-family: "Newsreader", serif; font-size: 24px; font-weight: 500; }
+.health-summary { display: flex; align-items: center; gap: 17px; }
+.health-summary strong { display: grid; gap: 2px; min-width: 70px; font-family: "DM Mono", monospace; font-size: 17px; font-weight: 500; }
+.health-summary strong span { color: var(--faint); font-size: 6px; font-weight: 400; text-transform: uppercase; letter-spacing: .08em; }
+.health-summary button, .health-cell button { border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; font-family: "DM Mono", monospace; font-size: 7px; cursor: pointer; }
+.health-summary button { height: 31px; padding: 0 10px; }
+.health-summary button:hover, .health-cell button:hover { color: var(--accent); border-color: var(--accent); }
+.health-matrix { max-height: 270px; overflow: auto; }
+.health-matrix-row { min-width: 650px; display: grid; grid-template-columns: minmax(190px, 1.4fr) repeat(3, minmax(130px, 1fr)); border-bottom: 1px solid var(--line); }
+.health-matrix-row > * { min-height: 42px; display: flex; align-items: center; padding: 8px 12px; border-right: 1px solid var(--line); }
+.health-matrix-row > *:last-child { border-right: 0; }
+.health-matrix-row > code { color: var(--ink); font-family: "DM Mono", monospace; font-size: 8px; }
+.health-matrix-head { position: sticky; z-index: 1; top: 0; color: var(--faint); background: var(--surface-2); font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; letter-spacing: .08em; }
+.health-cell { justify-content: space-between; gap: 7px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; }
+.health-cell::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.health-cell span { margin-right: auto; }
+.health-cell.missing, .health-cell.empty { color: var(--danger); background: color-mix(in srgb, var(--danger) 4%, transparent); }
+.health-cell.missing::before { background: transparent; box-shadow: inset 0 0 0 1px var(--danger); }
+.health-cell.empty::before { background: var(--danger); }
+.health-cell button { padding: 4px 6px; color: currentColor; border-color: color-mix(in srgb, currentColor 30%, var(--line)); }
+.health-panel > footer { min-height: 35px; display: flex; align-items: center; justify-content: space-between; padding: 0 13px; color: var(--faint); background: var(--surface-2); font-family: "DM Mono", monospace; font-size: 7px; text-transform: uppercase; letter-spacing: .06em; }
+.health-error, .health-loading { margin: 0; padding: 14px 17px; color: var(--muted); font-size: 9px; }
+.health-error { color: var(--danger); }
 .environment-tabs { display: flex; align-items: stretch; gap: 2px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px 9px 0 0; background: var(--surface); }
 .environment-tabs button { position: relative; min-width: 150px; height: 52px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 0 18px; border: 0; border-right: 1px solid var(--line); color: var(--muted); background: transparent; cursor: pointer; }
 .environment-tabs button::after { content: ""; position: absolute; right: 14px; bottom: 0; left: 14px; height: 2px; background: transparent; }
