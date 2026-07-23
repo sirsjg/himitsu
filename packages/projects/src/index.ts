@@ -26,6 +26,12 @@ export interface ProjectSettings {
   readonly defaultEnvironments: readonly string[];
 }
 
+export interface ProjectTag {
+  readonly id: string;
+  readonly name: string;
+  readonly color: string;
+}
+
 export interface Project {
   readonly id: string;
   readonly orgId: string;
@@ -34,6 +40,7 @@ export interface Project {
   readonly description: string | null;
   readonly settings: ProjectSettings;
   readonly tagIds: readonly string[];
+  readonly tags: readonly ProjectTag[];
   readonly archivedAt: Date | null;
   readonly deletedAt: Date | null;
   readonly purgeAfter: Date | null;
@@ -50,6 +57,7 @@ interface ProjectRow {
   deleted_at: Date | null;
   purge_after: Date | null;
   tag_ids: string[] | null;
+  tags: ProjectTag[] | null;
 }
 
 interface AuditRecorder {
@@ -105,6 +113,7 @@ function fromRow(row: ProjectRow): Project {
     description: row.description,
     settings: { defaultEnvironments },
     tagIds: row.tag_ids ?? [],
+    tags: row.tags ?? [],
     archivedAt: row.archived_at,
     deletedAt: row.deleted_at,
     purgeAfter: row.purge_after,
@@ -114,8 +123,12 @@ function fromRow(row: ProjectRow): Project {
 const projectSelect = `
   SELECT p.id, p.org_id, p.name, p.slug, p.description, p.settings,
          p.archived_at, p.deleted_at, p.purge_after,
-         COALESCE(array_agg(pt.tag_id) FILTER (WHERE pt.tag_id IS NOT NULL), '{}') AS tag_ids
-  FROM projects p LEFT JOIN project_tags pt ON pt.project_id = p.id AND pt.org_id = p.org_id`;
+         COALESCE(array_agg(pt.tag_id ORDER BY lower(t.name), pt.tag_id) FILTER (WHERE pt.tag_id IS NOT NULL), '{}') AS tag_ids,
+         COALESCE(jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color)
+           ORDER BY lower(t.name), t.id) FILTER (WHERE t.id IS NOT NULL), '[]'::jsonb) AS tags
+  FROM projects p
+  LEFT JOIN project_tags pt ON pt.project_id = p.id AND pt.org_id = p.org_id
+  LEFT JOIN tags t ON t.id = pt.tag_id AND t.org_id = pt.org_id`;
 
 export class ProjectService {
   readonly #resolver: AuthorizationContextResolver;

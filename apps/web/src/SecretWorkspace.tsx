@@ -22,6 +22,7 @@ export interface SecretView {
   readonly currentVersion: number;
   readonly updatedAt: string;
   readonly tags: readonly string[];
+  readonly tagIds?: readonly string[];
   readonly pending?: boolean;
   readonly conflict?: string;
 }
@@ -98,6 +99,7 @@ export interface BulkSecretInput {
   readonly key: string;
   readonly value: string;
   readonly allowNonConformingKey?: boolean;
+  readonly tagIds?: readonly string[];
 }
 
 export interface BulkParseResult {
@@ -129,6 +131,14 @@ interface ApiSecretMetadata {
   readonly notes: string | null;
   readonly currentVersion: number;
   readonly updatedAt: string;
+  readonly tagIds: readonly string[];
+  readonly tags: readonly { readonly id: string; readonly name: string; readonly color: string }[];
+}
+
+export interface TagView {
+  readonly id: string;
+  readonly name: string;
+  readonly color: string;
 }
 
 interface ApiSecretValue extends ApiSecretMetadata {
@@ -148,7 +158,8 @@ export interface SecretClient {
   list(projectId: string, environmentId: string): Promise<readonly ApiSecretMetadata[]>;
   reveal(secretId: string): Promise<ApiSecretValue>;
   create(projectId: string, environmentId: string, input: BulkSecretInput & { notes?: string | null }): Promise<ApiSecretMetadata>;
-  update(secretId: string, expectedVersion: number, input: { value: string; notes?: string | null; changeNote?: string }): Promise<ApiSecretMetadata>;
+  update(secretId: string, expectedVersion: number, input: { value: string; notes?: string | null; changeNote?: string; tagIds?: readonly string[] }): Promise<ApiSecretMetadata>;
+  listTags(): Promise<readonly TagView[]>;
   bulkSet(projectId: string, environmentId: string, secrets: readonly BulkSecretInput[]): Promise<readonly ApiSecretMetadata[]>;
   previewDotenv(projectId: string, environmentId: string, content: string): Promise<DotenvPreviewView>;
   importDotenv(projectId: string, environmentId: string, content: string, strategy: "skip" | "overwrite" | "merge", selectedKeys?: readonly string[]): Promise<SecretImportResultView>;
@@ -224,6 +235,7 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
     reveal: (secretId) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}`),
     create: (projectId, environmentId, input) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/secrets`, { method: "POST", body: JSON.stringify(input) }),
     update: (secretId, expectedVersion, input) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}`, { method: "PATCH", headers: { "if-match": `\"${expectedVersion}\"` }, body: JSON.stringify(input) }),
+    listTags: () => json("/api/v1/tags?limit=100"),
     bulkSet: (projectId, environmentId, secrets) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/secrets/bulk`, { method: "POST", body: JSON.stringify({ secrets }) }),
     previewDotenv: (projectId, environmentId, content) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/dotenv/preview`, { method: "POST", body: JSON.stringify({ content }) }),
     importDotenv: (projectId, environmentId, content, strategy, selectedKeys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/dotenv`, { method: "POST", body: JSON.stringify({ content, strategy, ...(selectedKeys === undefined ? {} : { selectedKeys }) }) }),
@@ -292,8 +304,8 @@ function demoPromotionPreviews(sourceEnvironmentId: string): Readonly<Record<str
   }));
 }
 
-function metadataToView(metadata: ApiSecretMetadata, tags: readonly string[] = []): SecretView {
-  return { ...metadata, tags };
+function metadataToView(metadata: ApiSecretMetadata): SecretView {
+  return { ...metadata, tags: metadata.tags.map(({ name }) => name) };
 }
 
 export function SecretWorkspace({
@@ -313,6 +325,9 @@ export function SecretWorkspace({
   const [secrets, setSecrets] = useState<readonly SecretView[]>(initialSecrets);
   const [query, setQuery] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [availableTags, setAvailableTags] = useState<readonly TagView[]>(() => projectId.startsWith("project-")
+    ? [...new Set(initialSecrets.flatMap(({ tags }) => tags))].sort().map((name) => ({ id: name, name, color: "#6B7280" }))
+    : []);
   const [editor, setEditor] = useState<{ mode: "add" | "edit"; secret?: SecretView; initialKey?: string } | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [historySecret, setHistorySecret] = useState<SecretView | null>(null);
@@ -365,6 +380,13 @@ export function SecretWorkspace({
 
   useEffect(() => { void refreshHealth(); void refreshDiff(diffSourceEnvironmentId); }, [client, projectId, diffSourceEnvironmentId]);
 
+  useEffect(() => {
+    if (projectId.startsWith("project-")) return;
+    void client.listTags().then(setAvailableTags).catch((reason) => {
+      setNotice({ kind: "error", message: reason instanceof Error ? reason.message : "Tags could not be loaded." });
+    });
+  }, [client, projectId]);
+
   useEffect(() => () => {
     for (const timer of remaskTimers.current.values()) clearTimeout(timer);
     remaskTimers.current.clear();
@@ -406,7 +428,7 @@ export function SecretWorkspace({
     }
   };
 
-  const save = async (values: { key: string; value: string; notes: string; allowNonConformingKey: boolean; changeNote: string }) => {
+  const save = async (values: { key: string; value: string; notes: string; allowNonConformingKey: boolean; changeNote: string; tagIds: readonly string[] }) => {
     if (environment === undefined) return;
     setNotice(null);
     if (editor?.mode === "edit" && editor.secret !== undefined) {
@@ -418,7 +440,8 @@ export function SecretWorkspace({
         notes: values.notes || null,
         currentVersion: before.currentVersion + 1,
         updatedAt: new Date().toISOString(),
-        tags: before.tags,
+        tags: availableTags.filter(({ id }) => values.tagIds.includes(id)).map(({ name }) => name),
+        tagIds: values.tagIds,
         pending: true,
       };
       setSecrets((current) => current.map((row) => row.id === before.id ? optimistic : row));
@@ -428,9 +451,10 @@ export function SecretWorkspace({
         const saved = await client.update(before.id, before.currentVersion, {
           value: values.value,
           notes: values.notes || null,
+          tagIds: values.tagIds,
           ...(values.changeNote ? { changeNote: values.changeNote } : {}),
         });
-        setSecrets((current) => current.map((row) => row.id === before.id ? metadataToView(saved, before.tags) : row));
+        setSecrets((current) => current.map((row) => row.id === before.id ? metadataToView(saved) : row));
         setNotice({ kind: "success", message: `${before.key} updated.` });
         void refreshHealth();
       } catch (error) {
@@ -441,11 +465,11 @@ export function SecretWorkspace({
       return;
     }
     const temporaryId = `pending-${crypto.randomUUID()}`;
-    const temporary: SecretView = { id: temporaryId, environmentId: environment.id, key: values.key.trim(), notes: values.notes || null, currentVersion: 1, updatedAt: new Date().toISOString(), tags: [], pending: true };
+    const temporary: SecretView = { id: temporaryId, environmentId: environment.id, key: values.key.trim(), notes: values.notes || null, currentVersion: 1, updatedAt: new Date().toISOString(), tags: availableTags.filter(({ id }) => values.tagIds.includes(id)).map(({ name }) => name), tagIds: values.tagIds, pending: true };
     setSecrets((current) => [...current, temporary]);
     setEditor(null);
     try {
-      const saved = await client.create(projectId, environment.id, { key: values.key, value: values.value, notes: values.notes || null, ...(values.allowNonConformingKey ? { allowNonConformingKey: true } : {}) });
+      const saved = await client.create(projectId, environment.id, { key: values.key, value: values.value, notes: values.notes || null, tagIds: values.tagIds, ...(values.allowNonConformingKey ? { allowNonConformingKey: true } : {}) });
       setSecrets((current) => current.map((row) => row.id === temporaryId ? metadataToView(saved) : row));
       setNotice({ kind: "success", message: `${saved.key} created.` });
       void refreshHealth();
@@ -463,7 +487,7 @@ export function SecretWorkspace({
         const saved = row.environmentId === environment.id ? savedByKey.get(row.key) : undefined;
         if (saved === undefined) return row;
         savedByKey.delete(row.key);
-        return metadataToView(saved, row.tags);
+        return metadataToView(saved);
       });
       return [...replaced, ...[...savedByKey.values()].map((row) => metadataToView(row))];
     });
@@ -474,7 +498,7 @@ export function SecretWorkspace({
 
   const finishRollback = (saved: ApiSecretMetadata) => {
     const previous = secrets.find(({ id }) => id === saved.id);
-    const view = metadataToView(saved, previous?.tags ?? []);
+    const view = metadataToView(saved);
     setSecrets((current) => current.map((row) => row.id === saved.id ? view : row));
     setHistorySecret(view);
     setNotice({ kind: "success", message: `${saved.key} rolled back as new version ${saved.currentVersion}.` });
@@ -488,7 +512,7 @@ export function SecretWorkspace({
         const saved = secret.environmentId === result.targetEnvironmentId ? savedByKey.get(secret.key) : undefined;
         if (saved === undefined) return secret;
         savedByKey.delete(secret.key);
-        return metadataToView(saved, secret.tags);
+        return metadataToView(saved);
       });
       return [...replaced, ...[...savedByKey.values()].map((secret) => metadataToView(secret))];
     });
@@ -537,7 +561,7 @@ export function SecretWorkspace({
           <span className="row-count">{visibleSecrets.length} / {environmentSecrets.length}</span>
         </header>
         {notice ? <p className={`workspace-notice ${notice.kind}`} role="status">{notice.message}<button type="button" aria-label="Dismiss notification" onClick={() => setNotice(null)}>×</button></p> : null}
-        {editor ? <SecretEditor mode={editor.mode} {...(editor.secret === undefined ? {} : { secret: editor.secret })} {...(editor.initialKey === undefined ? {} : { initialKey: editor.initialKey })} onCancel={() => setEditor(null)} onSave={save} /> : null}
+        {editor ? <SecretEditor mode={editor.mode} availableTags={availableTags} {...(editor.secret === undefined ? {} : { secret: editor.secret })} {...(editor.initialKey === undefined ? {} : { initialKey: editor.initialKey })} onCancel={() => setEditor(null)} onSave={save} /> : null}
         <div className="secret-table" role="table" aria-label={`${environment?.name ?? "Environment"} secrets`}>
           <div className="secret-table-head" role="row"><span role="columnheader">Key</span><span role="columnheader">Encrypted value</span><span role="columnheader">Tags</span><span role="columnheader">Version</span><span role="columnheader" className="sr-only">Actions</span></div>
           {visibleSecrets.map((secret) => (
@@ -655,22 +679,24 @@ function PromotionDialog({ projectId, environments, request, preview, client, on
   return <div className="sheet-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="editor-sheet promotion-sheet" role="dialog" aria-modal="true" aria-label="Review secret promotion"><header><div><span className="kicker">Encrypted promotion</span><h2>{source?.name ?? "Source"} → {target?.name ?? "Target"}</h2><p>Values stay masked and are re-encrypted for the target environment.</p></div><button type="button" aria-label="Close promotion" onClick={onCancel}>×</button></header><div className="import-summary"><strong>{summary.selected}<span>selected</span></strong><strong>{summary.created}<span>creates</span></strong><strong className={summary.overwritten > 0 ? "danger" : ""}>{summary.overwritten}<span>overwrites</span></strong></div>{target?.protected ? <p className="promotion-warning">◆ Protected environment · elevated write permission is required.</p> : null}<div className="promotion-list">{items.map((item) => <div key={item.key}><code>{item.key}</code><span className={item.action}>{item.action}</span><small>{item.action === "overwrite" ? item.changed ? "value differs" : "value matches" : "not present"}</small></div>)}</div>{error ? <p className="import-error" role="alert">{error}</p> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" disabled={busy || items.length === 0} onClick={() => void commit()}>{busy ? "Promoting…" : `Promote ${items.length} key${items.length === 1 ? "" : "s"}`}</button></footer></section></div>;
 }
 
-function SecretEditor({ mode, secret, initialKey, onCancel, onSave }: {
+function SecretEditor({ mode, secret, initialKey, availableTags, onCancel, onSave }: {
   mode: "add" | "edit";
   secret?: SecretView;
   initialKey?: string;
+  availableTags: readonly TagView[];
   onCancel: () => void;
-  onSave: (values: { key: string; value: string; notes: string; allowNonConformingKey: boolean; changeNote: string }) => Promise<void>;
+  onSave: (values: { key: string; value: string; notes: string; allowNonConformingKey: boolean; changeNote: string; tagIds: readonly string[] }) => Promise<void>;
 }): ReactNode {
   const [key, setKey] = useState(secret?.key ?? initialKey ?? "");
   const [allowNonConformingKey, setAllowNonConformingKey] = useState(false);
+  const [tagIds, setTagIds] = useState<ReadonlySet<string>>(new Set(secret?.tagIds ?? []));
   const conventional = isConventionalSecretKey(key);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    void onSave({ key, value: String(data.get("value") ?? ""), notes: String(data.get("notes") ?? ""), changeNote: String(data.get("changeNote") ?? ""), allowNonConformingKey });
+    void onSave({ key, value: String(data.get("value") ?? ""), notes: String(data.get("notes") ?? ""), changeNote: String(data.get("changeNote") ?? ""), allowNonConformingKey, tagIds: [...tagIds] });
   };
-  return <form className="editor-sheet inline-secret-editor" aria-label={`${mode === "add" ? "Add" : "Edit"} secret`} onSubmit={submit}><header><div><span className="kicker">{mode === "add" ? "New encrypted value" : `Version ${secret?.currentVersion ?? ""}`}</span><h2>{mode === "add" ? "Add a secret" : `Update ${secret?.key ?? "secret"}`}</h2></div><button type="button" aria-label="Close editor" onClick={onCancel}>×</button></header><label>Key<input name="key" value={key} disabled={mode === "edit"} onChange={(event) => setKey(event.target.value)} required maxLength={255} autoFocus={mode === "add"} /><small className={conventional || key === "" ? "key-hint" : "key-hint warning"}>{conventional || key === "" ? "Use UPPERCASE_SNAKE_CASE, for example DATABASE_URL." : "This key does not follow UPPERCASE_SNAKE_CASE."}</small></label>{!conventional && key !== "" && mode === "add" ? <label className="check-row"><input type="checkbox" checked={allowNonConformingKey} onChange={(event) => setAllowNonConformingKey(event.target.checked)} /> Keep this non-standard key</label> : null}<label>{mode === "add" ? "Value" : "Replacement value"}<textarea name="value" required rows={5} spellCheck={false} autoComplete="off" placeholder="Secret value (never shown after save)" /></label><label>Note <span>optional</span><input name="notes" defaultValue={secret?.notes ?? ""} maxLength={4000} placeholder="What uses this secret?" /></label>{mode === "edit" ? <label>Change note <span>optional</span><input name="changeNote" maxLength={1000} placeholder="Why is this value changing?" /></label> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit" disabled={key.trim() === "" || (!conventional && !allowNonConformingKey && mode === "add")}>{mode === "add" ? "Encrypt & save" : "Create new version"}</button></footer></form>;
+  return <form className="editor-sheet inline-secret-editor" aria-label={`${mode === "add" ? "Add" : "Edit"} secret`} onSubmit={submit}><header><div><span className="kicker">{mode === "add" ? "New encrypted value" : `Version ${secret?.currentVersion ?? ""}`}</span><h2>{mode === "add" ? "Add a secret" : `Update ${secret?.key ?? "secret"}`}</h2></div><button type="button" aria-label="Close editor" onClick={onCancel}>×</button></header><label>Key<input name="key" value={key} disabled={mode === "edit"} onChange={(event) => setKey(event.target.value)} required maxLength={255} autoFocus={mode === "add"} /><small className={conventional || key === "" ? "key-hint" : "key-hint warning"}>{conventional || key === "" ? "Use UPPERCASE_SNAKE_CASE, for example DATABASE_URL." : "This key does not follow UPPERCASE_SNAKE_CASE."}</small></label>{!conventional && key !== "" && mode === "add" ? <label className="check-row"><input type="checkbox" checked={allowNonConformingKey} onChange={(event) => setAllowNonConformingKey(event.target.checked)} /> Keep this non-standard key</label> : null}<label>{mode === "add" ? "Value" : "Replacement value"}<textarea name="value" required rows={5} spellCheck={false} autoComplete="off" placeholder="Secret value (never shown after save)" /></label><label>Note <span>optional</span><input name="notes" defaultValue={secret?.notes ?? ""} maxLength={4000} placeholder="What uses this secret?" /></label>{mode === "edit" ? <label>Change note <span>optional</span><input name="changeNote" maxLength={1000} placeholder="Why is this value changing?" /></label> : null}{availableTags.length > 0 ? <fieldset className="tag-picker"><legend>Tags <span>optional</span></legend>{availableTags.map((tag) => <label key={tag.id}><input type="checkbox" checked={tagIds.has(tag.id)} onChange={() => setTagIds((current) => { const next = new Set(current); if (next.has(tag.id)) next.delete(tag.id); else next.add(tag.id); return next; })} /><span style={{ borderColor: tag.color }}>#{tag.name}</span></label>)}</fieldset> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit" disabled={key.trim() === "" || (!conventional && !allowNonConformingKey && mode === "add")}>{mode === "add" ? "Encrypt & save" : "Create new version"}</button></footer></form>;
 }
 
 function DotenvImport({ projectId, environmentId, client, onCancel, onImported }: {

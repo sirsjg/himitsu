@@ -83,6 +83,8 @@ interface IdParams {
 interface PageQuery {
   limit?: number;
   offset?: number;
+  search?: string;
+  tagId?: string;
 }
 
 interface TagRow {
@@ -108,6 +110,15 @@ const pageQuery = {
     offset: { type: "integer", minimum: 0, default: 0 },
   },
 } as const;
+const searchablePageQuery = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...pageQuery.properties,
+    search: { type: "string", maxLength: 200 },
+    tagId: uuid,
+  },
+} as const;
 const errorResponse = {
   type: "object",
   additionalProperties: false,
@@ -130,7 +141,7 @@ const dateTime = { type: "string", format: "date-time" } as const;
 const nullableDateTime = { type: ["string", "null"], format: "date-time" } as const;
 const projectSchema = {
   type: "object", additionalProperties: false,
-  required: ["id", "orgId", "name", "slug", "description", "settings", "tagIds", "archivedAt", "deletedAt", "purgeAfter"],
+  required: ["id", "orgId", "name", "slug", "description", "settings", "tagIds", "tags", "archivedAt", "deletedAt", "purgeAfter"],
   properties: {
     id: uuid, orgId: uuid, name: { type: "string" }, slug: { type: "string" },
     description: { type: ["string", "null"] },
@@ -139,6 +150,7 @@ const projectSchema = {
       properties: { defaultEnvironments: { type: "array", items: { type: "string" } } },
     },
     tagIds: { type: "array", items: uuid }, archivedAt: nullableDateTime,
+    tags: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "name", "color"], properties: { id: uuid, name: { type: "string" }, color: { type: "string" } } } },
     deletedAt: nullableDateTime, purgeAfter: nullableDateTime,
   },
 } as const;
@@ -154,6 +166,8 @@ const environmentSchema = {
 const secretMetadataProperties = {
   id: uuid, orgId: uuid, projectId: uuid, environmentId: uuid, key: { type: "string" },
   notes: { type: ["string", "null"] }, currentVersion: { type: "integer", minimum: 1 },
+  tagIds: { type: "array", items: uuid },
+  tags: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "name", "color"], properties: { id: uuid, name: { type: "string" }, color: { type: "string" } } } },
   createdAt: dateTime, updatedAt: dateTime,
 } as const;
 const secretMetadataSchema = {
@@ -431,6 +445,7 @@ export const apiRoutePermissions = Object.freeze({
   listTags: "org.settings.read",
   createTag: "org.settings.update",
   updateTag: "org.settings.update",
+  mergeTag: "org.settings.update",
   deleteTag: "org.settings.update",
   listApiKeys: "api_key.read",
   createApiKey: "api_key.create",
@@ -777,12 +792,19 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
   });
 
   app.get("/api/v1/projects", {
-    schema: { operationId: "listProjects", tags: ["projects"], querystring: pageQuery, response: apiResponses(listSchema(projectSchema), true) },
+    schema: { operationId: "listProjects", tags: ["projects"], querystring: searchablePageQuery, response: apiResponses(listSchema(projectSchema), true) },
   }, async (request) => withTenant(request, async (transaction, context) => {
     const all = await dependencies.projects.list(transaction, context.userId);
-    const visible = context.apiKey?.projectId === null || context.apiKey === null
+    const scoped = context.apiKey?.projectId === null || context.apiKey === null
       ? all
       : all.filter(({ id }) => id === context.apiKey?.projectId);
+    const query = request.query as PageQuery;
+    const terms = (query.search ?? "").trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const visible = scoped.filter((project) => {
+      if (query.tagId !== undefined && !project.tagIds.includes(query.tagId)) return false;
+      const search = `${project.name} ${project.slug} ${project.description ?? ""} ${project.tags.map(({ name }) => name).join(" ")}`.toLocaleLowerCase();
+      return terms.every((term) => search.includes(term));
+    });
     return paginated(visible, request.query as PageQuery);
   }));
 
@@ -1054,16 +1076,19 @@ function registerSecretRoutes(
       key: { type: "string", minLength: 1, maxLength: 255 },
       value: { type: "string" }, notes: { type: ["string", "null"], maxLength: 4000 },
       changeNote: { type: ["string", "null"], maxLength: 1000 }, allowNonConformingKey: { type: "boolean" },
+      tagIds: { type: "array", maxItems: 50, uniqueItems: true, items: uuid },
     },
   } as const;
   app.get("/api/v1/projects/:projectId/environments/:environmentId/secrets", {
-    schema: { operationId: "listSecrets", tags: ["secrets"], params: scopeParams, querystring: pageQuery, response: apiResponses(listSchema(secretMetadataSchema), true) },
+    schema: { operationId: "listSecrets", tags: ["secrets"], params: scopeParams, querystring: searchablePageQuery, response: apiResponses(listSchema(secretMetadataSchema), true) },
   }, async (request) => withTenant(request, async (transaction, context) => {
+    const query = request.query as PageQuery;
     const all = await dependencies.secrets.list(
       transaction,
       context.userId,
       params(request).projectId ?? "",
       params(request).environmentId ?? "",
+      { ...(query.search === undefined ? {} : { search: query.search }), ...(query.tagId === undefined ? {} : { tagId: query.tagId }) },
     );
     return paginated(all, request.query as PageQuery);
   }));
@@ -1266,7 +1291,7 @@ function registerSecretRoutes(
   app.patch("/api/v1/secrets/:secretId", {
     schema: {
       operationId: "updateSecret", tags: ["secrets"], params: secretParams,
-      body: { type: "object", additionalProperties: false, required: ["value"], properties: { value: { type: "string" }, notes: { type: ["string", "null"], maxLength: 4000 }, changeNote: { type: ["string", "null"], maxLength: 1000 } } },
+      body: { type: "object", additionalProperties: false, required: ["value"], properties: { value: { type: "string" }, notes: { type: ["string", "null"], maxLength: 4000 }, changeNote: { type: ["string", "null"], maxLength: 1000 }, tagIds: { type: "array", maxItems: 50, uniqueItems: true, items: uuid } } },
       response: apiResponses(secretMetadataSchema),
     },
   }, async (request) => {
@@ -1392,6 +1417,40 @@ function registerTagRoutes(app: FastifyInstance, withTenant: WithTenant): void {
     const row = updated.rows[0];
     if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Tag not found");
     return { data: tagFromRow(row) };
+  }));
+  app.post("/api/v1/tags/:tagId/merge", {
+    schema: {
+      operationId: "mergeTag", tags: ["tags"], params: idParams({ tagId: uuid }),
+      body: { type: "object", additionalProperties: false, required: ["targetTagId"], properties: { targetTagId: uuid } },
+      response: apiResponses(tagSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    requirePermission(await resolver.resolve(transaction, context.userId), "org.settings.update");
+    const sourceTagId = params(request).tagId ?? "";
+    const { targetTagId } = request.body as { targetTagId: string };
+    if (sourceTagId === targetTagId) throw new ApiError(400, "INVALID_INPUT", "A tag cannot be merged into itself");
+    const locked = await transaction.query<TagRow>(
+      `SELECT id, name, color, created_at, updated_at FROM tags
+       WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
+      [[sourceTagId, targetTagId]],
+    );
+    if (locked.rowCount !== 2) throw new ApiError(404, "NOT_FOUND", "Source or target tag not found");
+    await transaction.query(
+      `INSERT INTO project_tags (org_id, project_id, tag_id)
+       SELECT org_id, project_id, $2 FROM project_tags WHERE tag_id = $1
+       ON CONFLICT (org_id, project_id, tag_id) DO NOTHING`,
+      [sourceTagId, targetTagId],
+    );
+    await transaction.query(
+      `INSERT INTO secret_tags (org_id, project_id, environment_id, secret_id, tag_id)
+       SELECT org_id, project_id, environment_id, secret_id, $2 FROM secret_tags WHERE tag_id = $1
+       ON CONFLICT (org_id, secret_id, tag_id) DO NOTHING`,
+      [sourceTagId, targetTagId],
+    );
+    await transaction.query("DELETE FROM tags WHERE id = $1", [sourceTagId]);
+    const target = locked.rows.find(({ id }) => id === targetTagId);
+    if (target === undefined) throw new ApiError(404, "NOT_FOUND", "Target tag not found");
+    return { data: tagFromRow(target) };
   }));
   app.delete("/api/v1/tags/:tagId", {
     schema: { operationId: "deleteTag", tags: ["tags"], params: idParams({ tagId: uuid }), response: apiResponses(tagSchema) },

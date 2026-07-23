@@ -7,6 +7,7 @@ import {
   type CommandItem,
   createProject,
   filterCommandItems,
+  filterProjectLinks,
   validateAuthForm,
 } from "../src/App.js";
 import {
@@ -74,7 +75,7 @@ test("project creation posts the API contract and returns a workspace-ready proj
     });
   });
   assert.deepEqual(request, { input: "/api/v1/projects", method: "POST", body: { name: "Payments API", slug: "payments-api" } });
-  assert.deepEqual(project, { id: "project-id", name: "Payments API", slug: "payments-api", secrets: [] });
+  assert.deepEqual(project, { id: "project-id", name: "Payments API", slug: "payments-api", secrets: [], tags: [] });
 
   await assert.rejects(
     () => createProject({ name: "Duplicate", slug: "payments-api" }, async () => new Response(JSON.stringify({ error: { message: "Project slug already exists" } }), { status: 409 })),
@@ -186,6 +187,15 @@ test("secret search combines text terms and tag filters without examining values
   assert.deepEqual(filterSecretRows(demoSecretRows, "plaintext-not-indexed", null), []);
 });
 
+test("project search combines names, slugs, and organization tags", () => {
+  const projects = [
+    { id: "one", name: "Payments API", slug: "payments-api", secrets: [], tags: ["pci", "database"] },
+    { id: "two", name: "Marketing Site", slug: "marketing-site", secrets: [], tags: ["public"] },
+  ];
+  assert.deepEqual(filterProjectLinks(projects, "payments database", "pci").map(({ id }) => id), ["one"]);
+  assert.deepEqual(filterProjectLinks(projects, "site", "pci"), []);
+});
+
 test("secret client targets v1 routes, sends optimistic version preconditions, and surfaces conflicts", async () => {
   const calls: Array<{ input: string; init?: RequestInit }> = [];
   const metadata = {
@@ -206,6 +216,8 @@ test("secret client targets v1 routes, sends optimistic version preconditions, a
   assert.equal(calls[0]?.init?.method, "PATCH");
   assert.equal(new Headers(calls[0]?.init?.headers).get("if-match"), '"3"');
   assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { value: "replacement", changeNote: "rotation" });
+  await client.listTags();
+  assert.equal(calls[1]?.input, "/api/v1/tags?limit=100");
 
   const conflicting = createSecretClient(async () => new Response(
     JSON.stringify({ error: { message: "Version is stale" } }),

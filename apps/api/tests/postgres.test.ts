@@ -442,6 +442,76 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   assert.equal(missing.json().error.code, "NOT_FOUND");
 });
 
+test("attaches, searches, filters, merges, and deletes tags without breaking references", async () => {
+  const otherOrgTag = await app.inject({
+    method: "POST", url: "/api/v1/tags", headers: headers(orgB, ownerB),
+    payload: { name: "other-tenant", color: "#111827" },
+  });
+  assert.equal(otherOrgTag.statusCode, 201, otherOrgTag.body);
+  const crossTenantAttach = await app.inject({
+    method: "POST", url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: headers(orgA, memberA),
+    payload: { key: "CROSS_TENANT_TAG", value: "never-written", tagIds: [otherOrgTag.json().data.id] },
+  });
+  assert.equal(crossTenantAttach.statusCode, 400, crossTenantAttach.body);
+  assert.equal(crossTenantAttach.json().error.code, "TAG_NOT_FOUND");
+
+  const sourceTag = await app.inject({
+    method: "POST", url: "/api/v1/tags", headers: headers(orgA, ownerA),
+    payload: { name: "pci-legacy", color: "#7C3AED" },
+  });
+  assert.equal(sourceTag.statusCode, 201, sourceTag.body);
+  const sourceTagId = sourceTag.json().data.id as string;
+
+  const taggedProject = await app.inject({
+    method: "PATCH", url: `/api/v1/projects/${projectId}`, headers: headers(orgA, ownerA),
+    payload: { tagIds: [sourceTagId] },
+  });
+  assert.equal(taggedProject.statusCode, 200, taggedProject.body);
+  assert.equal(taggedProject.json().data.tags[0].name, "pci-legacy");
+
+  const taggedSecret = await app.inject({
+    method: "POST", url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: headers(orgA, memberA),
+    payload: { key: "TAGGED_CREDENTIAL", value: "tagged-value", tagIds: [sourceTagId] },
+  });
+  assert.equal(taggedSecret.statusCode, 201, taggedSecret.body);
+  assert.deepEqual(taggedSecret.json().data.tagIds, [sourceTagId]);
+  assert.equal(taggedSecret.json().data.tags[0].name, "pci-legacy");
+
+  const projectFilter = await app.inject({
+    method: "GET", url: `/api/v1/projects?tagId=${sourceTagId}&search=pci`, headers: headers(orgA, memberA),
+  });
+  assert.equal(projectFilter.statusCode, 200, projectFilter.body);
+  assert.deepEqual(projectFilter.json().data.map(({ id }: { id: string }) => id), [projectId]);
+  const secretFilter = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets?tagId=${sourceTagId}&search=legacy`,
+    headers: headers(orgA, memberA),
+  });
+  assert.equal(secretFilter.statusCode, 200, secretFilter.body);
+  assert.deepEqual(secretFilter.json().data.map(({ key }: { key: string }) => key), ["TAGGED_CREDENTIAL"]);
+
+  const merged = await app.inject({
+    method: "POST", url: `/api/v1/tags/${sourceTagId}/merge`, headers: headers(orgA, ownerA),
+    payload: { targetTagId: tagId },
+  });
+  assert.equal(merged.statusCode, 200, merged.body);
+  assert.equal(merged.json().data.id, tagId);
+  const projectAfterMerge = await app.inject({
+    method: "GET", url: `/api/v1/projects/${projectId}`, headers: headers(orgA, memberA),
+  });
+  assert.deepEqual(projectAfterMerge.json().data.tagIds, [tagId]);
+  const secretsAfterMerge = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets?tagId=${tagId}&search=TAGGED`,
+    headers: headers(orgA, memberA),
+  });
+  assert.deepEqual(secretsAfterMerge.json().data[0].tagIds, [tagId]);
+  assert.equal(secretsAfterMerge.json().data[0].tags[0].name, "datastore");
+
+});
+
 test("returns a value-free consistency matrix and exit-code-friendly summary", async () => {
   const empty = await app.inject({
     method: "POST",
@@ -944,6 +1014,18 @@ test("deletes tags and projects through their v1 lifecycle endpoints", async () 
     method: "DELETE", url: `/api/v1/tags/${tagId}`, headers: headers(orgA, ownerA),
   });
   assert.equal(deletedTag.statusCode, 200, deletedTag.body);
+  const projectWithoutDeletedTag = await app.inject({
+    method: "GET", url: `/api/v1/projects/${projectId}`, headers: headers(orgA, ownerA),
+  });
+  assert.deepEqual(projectWithoutDeletedTag.json().data.tagIds, []);
+  assert.deepEqual(projectWithoutDeletedTag.json().data.tags, []);
+  const secretWithoutDeletedTag = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets?search=TAGGED_CREDENTIAL`,
+    headers: headers(orgA, ownerA),
+  });
+  assert.deepEqual(secretWithoutDeletedTag.json().data[0].tagIds, []);
+  assert.deepEqual(secretWithoutDeletedTag.json().data[0].tags, []);
   const deletedProject = await app.inject({
     method: "DELETE", url: `/api/v1/projects/${projectId}`, headers: headers(orgA, ownerA),
   });

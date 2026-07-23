@@ -14,8 +14,9 @@ async function installApi(page: Page): Promise<void> {
     const path = new URL(request.url()).pathname;
     if (path === "/api/v1/auth/login") return json(route, {});
     if (path === "/api/v1/projects" && request.method() === "POST") {
-      return json(route, { id: "e2e-project", name: "E2E Vault", slug: "e2e-vault" }, 201);
+      return json(route, { id: "e2e-project", name: "E2E Vault", slug: "e2e-vault", tags: [] }, 201);
     }
+    if (path === "/api/v1/tags" && request.method() === "GET") return json(route, []);
     if (path.endsWith("/consistency")) {
       const matrix = [...keys].sort().map((key) => ({
         key,
@@ -43,7 +44,7 @@ async function installApi(page: Page): Promise<void> {
     if (path.endsWith("/secrets") && request.method() === "POST") {
       const body = request.postDataJSON() as { key: string };
       keys.add(body.key);
-      return json(route, { id: `secret-${nextSecret++}`, environmentId: "development", key: body.key, notes: null, currentVersion: 1, updatedAt: now }, 201);
+      return json(route, { id: `secret-${nextSecret++}`, environmentId: "development", key: body.key, notes: null, currentVersion: 1, updatedAt: now, tagIds: [], tags: [] }, 201);
     }
     if (path.endsWith("/imports/dotenv/preview")) {
       return json(route, {
@@ -59,7 +60,7 @@ async function installApi(page: Page): Promise<void> {
       keys.add("REDIS_URL");
       keys.add("SENTRY_DSN");
       return json(route, {
-        secrets: ["REDIS_URL", "SENTRY_DSN"].map((key) => ({ id: `secret-${nextSecret++}`, environmentId: "development", key, notes: null, currentVersion: 1, updatedAt: now })),
+        secrets: ["REDIS_URL", "SENTRY_DSN"].map((key) => ({ id: `secret-${nextSecret++}`, environmentId: "development", key, notes: null, currentVersion: 1, updatedAt: now, tagIds: [], tags: [] })),
         summary: { created: 2, updated: 0, skipped: 0 },
       });
     }

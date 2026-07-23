@@ -21,6 +21,7 @@ export class SecretError extends Error {
     | "KEY_EXISTS"
     | "VERSION_CONFLICT"
     | "VERSION_NOT_FOUND"
+    | "TAG_NOT_FOUND"
     | "NOT_FOUND";
 
   constructor(code: SecretError["code"], message: string) {
@@ -30,6 +31,12 @@ export class SecretError extends Error {
   }
 }
 
+export interface SecretTag {
+  readonly id: string;
+  readonly name: string;
+  readonly color: string;
+}
+
 export interface SecretMetadata {
   readonly id: string;
   readonly orgId: string;
@@ -37,6 +44,8 @@ export interface SecretMetadata {
   readonly environmentId: string;
   readonly key: string;
   readonly notes: string | null;
+  readonly tagIds: readonly string[];
+  readonly tags: readonly SecretTag[];
   readonly currentVersion: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -61,6 +70,7 @@ export interface SetSecretInput {
   readonly notes?: string | null;
   readonly changeNote?: string | null;
   readonly allowNonConformingKey?: boolean;
+  readonly tagIds?: readonly string[];
 }
 
 export type SecretImportStrategy = "skip" | "overwrite" | "merge";
@@ -105,6 +115,8 @@ interface SecretRow {
   current_version: number;
   created_at: Date;
   updated_at: Date;
+  tag_ids?: string[] | null;
+  tags?: SecretTag[] | null;
 }
 
 interface SecretValueRow extends SecretRow {
@@ -180,6 +192,8 @@ function metadataFromRow(row: SecretRow): SecretMetadata {
     environmentId: row.environment_id,
     key: row.key,
     notes: row.notes,
+    tagIds: row.tag_ids ?? [],
+    tags: row.tags ?? [],
     currentVersion: row.current_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -206,17 +220,30 @@ export class SecretService {
     actorUserId: string,
     projectId: string,
     environmentId: string,
+    filters: { search?: string; tagId?: string } = {},
   ): Promise<readonly SecretMetadata[]> {
     const environment = await this.#environment(transaction, projectId, environmentId);
     requirePermission(
       await this.#resolver.resolve(transaction, actorUserId, projectId, environment.protected),
       "secret.read",
     );
+    const search = filters.search?.trim() || null;
     const result = await transaction.query<SecretRow>(
       `${secretSelect}
        WHERE s.project_id = $1 AND s.environment_id = $2 AND s.deleted_at IS NULL
+         AND ($3::text IS NULL OR s.key ILIKE '%' || $3 || '%' OR COALESCE(s.notes, '') ILIKE '%' || $3 || '%'
+           OR EXISTS (
+             SELECT 1 FROM secret_tags search_st
+             JOIN tags search_t ON search_t.id = search_st.tag_id AND search_t.org_id = search_st.org_id
+             WHERE search_st.secret_id = s.id AND search_st.org_id = s.org_id
+               AND search_t.name ILIKE '%' || $3 || '%'
+           ))
+         AND ($4::uuid IS NULL OR EXISTS (
+           SELECT 1 FROM secret_tags filter_st
+           WHERE filter_st.secret_id = s.id AND filter_st.org_id = s.org_id AND filter_st.tag_id = $4
+         ))
        ORDER BY s.key, s.id`,
-      [projectId, environmentId],
+      [projectId, environmentId, search, filters.tagId ?? null],
     );
     return result.rows.map(metadataFromRow);
   }
@@ -414,7 +441,7 @@ export class SecretService {
     transaction: TenantTransaction,
     actorUserId: string,
     secretId: string,
-    input: { value: string; notes?: string | null; changeNote?: string | null; expectedVersion?: number },
+    input: { value: string; notes?: string | null; changeNote?: string | null; expectedVersion?: number; tagIds?: readonly string[] },
   ): Promise<SecretMetadata> {
     const before = await this.#metadataRow(transaction, secretId, true);
     const environment = await this.#environment(transaction, before.project_id, before.environment_id);
@@ -746,7 +773,7 @@ export class SecretService {
         transaction,
         actorUserId,
         recoverable,
-        { value: input.value, notes, changeNote },
+        { value: input.value, notes, changeNote, tagIds: input.tagIds ?? [] },
         "secret.created",
         recordAudit,
       );
@@ -767,7 +794,7 @@ export class SecretService {
         transaction,
         actorUserId,
         row,
-        { value: input.value, notes, changeNote },
+        { value: input.value, notes, changeNote, tagIds: input.tagIds ?? [] },
         "secret.created",
         recordAudit,
       );
@@ -783,7 +810,7 @@ export class SecretService {
     transaction: TenantTransaction,
     actorUserId: string,
     before: SecretRow,
-    input: { value: string; notes?: string | null; changeNote?: string | null },
+    input: { value: string; notes?: string | null; changeNote?: string | null; tagIds?: readonly string[] },
     action: "secret.created" | "secret.updated",
     recordAudit = true,
   ): Promise<SecretMetadata> {
@@ -828,6 +855,7 @@ export class SecretService {
       );
       const row = updated.rows[0];
       if (row === undefined) throw new SecretError("NOT_FOUND", "Secret not found");
+      if (input.tagIds !== undefined) await this.#replaceTags(transaction, row, input.tagIds);
       if (recordAudit) {
         await this.#audit.recordInTransaction(transaction, {
           orgId: transaction.orgId,
@@ -842,7 +870,7 @@ export class SecretService {
           after: { key: row.key, version: row.current_version, notesPresent: row.notes !== null },
         });
       }
-      return metadataFromRow(row);
+      return metadataFromRow(await this.#metadataRow(transaction, row.id));
     } finally {
       plaintext.fill(0);
       encryption.clearKeyCache();
@@ -861,6 +889,32 @@ export class SecretService {
     const row = result.rows[0];
     if (row === undefined) throw new SecretError("NOT_FOUND", "Secret not found");
     return row;
+  }
+
+  async #replaceTags(
+    transaction: TenantTransaction,
+    secret: Pick<SecretRow, "id" | "project_id" | "environment_id">,
+    tagIds: readonly string[],
+  ): Promise<void> {
+    const uniqueTagIds = [...new Set(tagIds)];
+    if (uniqueTagIds.length > 50) throw new SecretError("INVALID_INPUT", "A secret can have at most 50 tags");
+    if (uniqueTagIds.length > 0) {
+      const found = await transaction.query<{ id: string }>(
+        "SELECT id FROM tags WHERE id = ANY($1::uuid[])",
+        [uniqueTagIds],
+      );
+      if (found.rowCount !== uniqueTagIds.length) {
+        throw new SecretError("TAG_NOT_FOUND", "One or more secret tags do not exist in this organization");
+      }
+    }
+    await transaction.query("DELETE FROM secret_tags WHERE secret_id = $1", [secret.id]);
+    if (uniqueTagIds.length > 0) {
+      await transaction.query(
+        `INSERT INTO secret_tags (org_id, project_id, environment_id, secret_id, tag_id)
+         SELECT $1, $2, $3, $4, unnest($5::uuid[])`,
+        [transaction.orgId, secret.project_id, secret.environment_id, secret.id, uniqueTagIds],
+      );
+    }
   }
 
   async #valueRow(transaction: TenantTransaction, secretId: string): Promise<SecretValueRow> {
@@ -1040,5 +1094,15 @@ export class SecretService {
 }
 
 const secretColumns = `s.id, s.org_id, s.project_id, s.environment_id, s.key,
-  s.notes, s.current_version, s.created_at, s.updated_at`;
+  s.notes, s.current_version, s.created_at, s.updated_at,
+  COALESCE((
+    SELECT array_agg(st.tag_id ORDER BY lower(t.name), st.tag_id)
+    FROM secret_tags st JOIN tags t ON t.id = st.tag_id AND t.org_id = st.org_id
+    WHERE st.org_id = s.org_id AND st.secret_id = s.id
+  ), '{}'::uuid[]) AS tag_ids,
+  COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color) ORDER BY lower(t.name), t.id)
+    FROM secret_tags st JOIN tags t ON t.id = st.tag_id AND t.org_id = st.org_id
+    WHERE st.org_id = s.org_id AND st.secret_id = s.id
+  ), '[]'::jsonb) AS tags`;
 const secretSelect = `SELECT ${secretColumns} FROM secrets s`;

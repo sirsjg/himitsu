@@ -31,6 +31,7 @@ export interface ProjectQuickLink {
   readonly name: string;
   readonly slug: string;
   readonly secrets: readonly string[];
+  readonly tags: readonly string[];
 }
 
 export interface CurrentUser {
@@ -54,10 +55,19 @@ export const demoOrganizations: readonly OrganizationOption[] = [
 ];
 
 export const demoProjects: readonly ProjectQuickLink[] = [
-  { id: "project-atlas", name: "Atlas API", slug: "atlas-api", secrets: ["DATABASE_URL", "STRIPE_SECRET_KEY"] },
-  { id: "project-lantern", name: "Lantern Web", slug: "lantern-web", secrets: ["AUTH_ORIGIN", "SENTRY_DSN"] },
-  { id: "project-relay", name: "Relay Worker", slug: "relay-worker", secrets: ["QUEUE_URL", "WORKER_TOKEN"] },
+  { id: "project-atlas", name: "Atlas API", slug: "atlas-api", secrets: ["DATABASE_URL", "STRIPE_SECRET_KEY"], tags: ["database", "pci"] },
+  { id: "project-lantern", name: "Lantern Web", slug: "lantern-web", secrets: ["AUTH_ORIGIN", "SENTRY_DSN"], tags: ["third-party"] },
+  { id: "project-relay", name: "Relay Worker", slug: "relay-worker", secrets: ["QUEUE_URL", "WORKER_TOKEN"], tags: ["infrastructure"] },
 ];
+
+export function filterProjectLinks(projects: readonly ProjectQuickLink[], query: string, activeTag: string | null): readonly ProjectQuickLink[] {
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  return projects.filter((project) => {
+    if (activeTag !== null && !project.tags.includes(activeTag)) return false;
+    const search = `${project.name} ${project.slug} ${project.tags.join(" ")}`.toLocaleLowerCase();
+    return terms.every((term) => search.includes(term));
+  });
+}
 
 export function filterCommandItems(items: readonly CommandItem[], query: string): readonly CommandItem[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
@@ -101,14 +111,14 @@ export async function createProject(
     body: JSON.stringify(input),
   });
   const payload = await response.json().catch(() => null) as {
-    data?: { id?: string; name?: string; slug?: string };
+    data?: { id?: string; name?: string; slug?: string; tags?: readonly { name: string }[] };
     error?: { message?: string };
   } | null;
   if (!response.ok) throw new Error(payload?.error?.message ?? "Project could not be created.");
   if (payload?.data?.id === undefined || payload.data.name === undefined || payload.data.slug === undefined) {
     throw new Error("Project response was incomplete.");
   }
-  return { id: payload.data.id, name: payload.data.name, slug: payload.data.slug, secrets: [] };
+  return { id: payload.data.id, name: payload.data.name, slug: payload.data.slug, secrets: [], tags: payload.data.tags?.map(({ name }) => name) ?? [] };
 }
 
 export interface AppRoutesProps {
@@ -279,6 +289,10 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const tags = [...new Set(projects.flatMap((project) => project.tags))].sort();
+  const visibleProjects = useMemo(() => filterProjectLinks(projects, query, activeTag), [projects, query, activeTag]);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -309,12 +323,14 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
         <Metric value="100%" label="encrypted" accent />
         <Metric value="0" label="open alerts" />
       </section>
+      <section className="secret-toolbar project-filters" aria-label="Filter projects"><label className="secret-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search projects</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects or tags" /></label><div className="tag-filters"><button type="button" className={activeTag === null ? "active" : ""} onClick={() => setActiveTag(null)}>All</button>{tags.map((tag) => <button type="button" key={tag} className={activeTag === tag ? "active" : ""} onClick={() => setActiveTag(tag)}>#{tag}</button>)}</div><span className="row-count">{visibleProjects.length} / {projects.length}</span></section>
       <section className="project-grid" aria-label="Projects">
-        {projects.map((project, index) => (
+        {visibleProjects.map((project, index) => (
           <NavLink className="project-card" to={`/app/projects/${project.id}`} key={project.id}>
             <span className="card-index">0{index + 1}</span>
             <div><small>PROJECT</small><h2>{project.name}</h2><p>{project.slug}</p></div>
             <div className="environment-row"><span>DEV</span><span>STG</span><span>PRD</span></div>
+            <div className="row-tags">{project.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>
             <footer><span>{project.secrets.length} indexed keys</span><span>View project →</span></footer>
           </NavLink>
         ))}

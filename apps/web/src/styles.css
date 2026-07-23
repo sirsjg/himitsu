@@ -102,6 +102,7 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .metric span { color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .metric.accent strong { color: var(--accent); }
 .project-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.project-filters { border: 1px solid var(--line); border-radius: 8px; }
 .project-card { min-height: 310px; display: flex; flex-direction: column; padding: 22px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: linear-gradient(145deg, color-mix(in srgb, var(--surface-2) 82%, transparent), var(--surface)); text-decoration: none; transition: 180ms ease; overflow: hidden; }
 .project-card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); box-shadow: 0 20px 40px rgb(0 0 0 / 14%); }
 .card-index { align-self: end; color: var(--line-strong); font-family: "DM Mono", monospace; font-size: 35px; }
@@ -325,6 +326,11 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .key-hint { color: var(--faint); font-size: 8px; font-weight: 400; }
 .key-hint.warning { color: var(--danger); }
 .editor-sheet > .check-row { display: flex; grid-template-columns: none; align-items: center; gap: 8px; margin-top: -8px; color: var(--danger); }
+.tag-picker { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; }
+.tag-picker legend { padding: 0 4px; color: var(--muted); font-size: 10px; font-weight: 650; }
+.tag-picker legend span { color: var(--faint); font-size: 8px; }
+.tag-picker label { display: flex; align-items: center; gap: 5px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 9px; cursor: pointer; }
+.tag-picker label span { padding: 4px 7px; border: 1px solid; border-radius: 999px; }
 .check-row input { accent-color: var(--accent); }
 .editor-sheet > footer { padding-top: 17px; border-top: 1px solid var(--line); }
 .bulk-sheet { width: min(680px, calc(100vw - 60px)); }
