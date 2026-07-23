@@ -183,7 +183,7 @@ export function AuditPage({
         <div className="audit-scope"><span>Project {event.projectId ?? "organization"}</span><span>Environment {event.environmentId ?? "—"}</span></div>
         <details><summary>Metadata</summary><pre>{JSON.stringify(event.metadata, null, 2)}</pre></details>
       </article>)}
-      {events.length === 0 && !busy ? <div className="audit-empty">No audit events match these filters.</div> : null}
+      {events.length === 0 && !busy ? <div className="audit-empty">{Object.values(filters).some((value) => value !== undefined && value !== "") ? "No audit events match these filters." : "Sensitive activity will appear here as your team creates projects, reads secrets, imports configuration, and connects automation."}</div> : null}
       <div ref={sentinel} className="audit-sentinel">{busy ? "Loading events…" : nextCursor ? <button type="button" onClick={() => void load(false)}>Load more</button> : "End of audit history"}</div>
     </section>
   </div>;

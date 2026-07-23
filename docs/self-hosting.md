@@ -2,12 +2,16 @@
 
 The supported self-hosted deployment uses Docker Compose, PostgreSQL 16, a Node 22 API image, and an Nginx web image. The API emits JSON logs to stdout, exposes unauthenticated liveness and database-readiness probes, and exports a small Prometheus text endpoint without tenant or secret labels.
 
+Prerequisites are Docker Engine with Compose v2, persistent storage sized for PostgreSQL plus backup generations, an HTTPS reverse proxy or load balancer for any non-local deployment, and two independent secure locations for the application master key and backup passphrase. The included Nginx container listens on HTTP port 8080; terminate TLS in front of it and forward the original scheme and client address. Secure session cookies will not work over public plain HTTP.
+
 ## First deployment
 
 1. Copy `.env.example` to `.env` and replace both database passwords with different URL-safe random values.
 2. Create `secrets/master-key` containing one canonical base64-encoded 32-byte key and `secrets/backup-passphrase` containing a long independent passphrase. Restrict both files to the deployment account: `chmod 600 secrets/master-key secrets/backup-passphrase`.
 3. Start the stack with `docker compose up --build -d`.
 4. Confirm `http://localhost:8080/health/live` returns `{"status":"ok"}` and `/health/ready` returns `{"status":"ready"}`.
+
+The server exposes delivery adapters for verification, password-reset, and organization-invitation email. The repository defaults are no-op adapters for local development; configure a transactional email adapter before allowing external signup or invitations. Never log delivery tokens.
 
 The one-shot `migrate` service runs before the API. It holds a PostgreSQL advisory lock, applies each forward SQL migration once, validates the stored SHA-256 checksum on later starts, provisions the non-superuser `himitsu_app` role, and records versions in `schema_migrations`. A checksum mismatch fails deployment; shipped migrations must never be edited.
 
@@ -53,3 +57,5 @@ After restoration, verify `schema_migrations`, authenticate with a non-productio
 ## Releases
 
 Pull requests build all three Docker targets in CI. Tags matching `vMAJOR.MINOR.PATCH` trigger `.github/workflows/release.yml`, which publishes multi-architecture API, web, and operations images to GitHub Container Registry with provenance and SBOM attestations. Pin immutable version tags or digests in production rather than tracking `latest`.
+
+Before an upgrade, read the release notes, take and verify an encrypted backup, preserve the exact master-key file, and pull immutable image tags. Start the migration service before replacing the API, verify readiness and `schema_migrations`, then exercise login, one secret read, runtime ETag behavior, and the audit viewer. Roll back application images only when their schema compatibility is documented; restore the database backup when a migration is not backward compatible.

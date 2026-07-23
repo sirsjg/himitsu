@@ -66,6 +66,20 @@ test("authenticated project route renders the shell, organization switcher, and 
   assert.match(html, /Relay Worker/);
 });
 
+test("first-run and empty-vault states lead a new organization through setup", () => {
+  const firstRun = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/projects"]}><AppRoutes projects={[]} /></MemoryRouter>);
+  assert.match(firstRun, /First-run checklist/);
+  assert.match(firstRun, /Organization ready/);
+  assert.match(firstRun, /Create first project/);
+  assert.match(firstRun, /Import your \.env/);
+  assert.match(firstRun, /Connect CI or runtime/);
+
+  const emptyVault = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/projects/empty-project"]}><AppRoutes projects={[{ id: "empty-project", name: "Empty Vault", slug: "empty-vault", secrets: [], tags: [] }]} /></MemoryRouter>);
+  assert.match(emptyVault, /This environment is ready for its first secret/);
+  assert.match(emptyVault, /Add first secret/);
+  assert.match(emptyVault, /Import your \.env/);
+});
+
 test("project creation posts the API contract and returns a workspace-ready project", async () => {
   let request: { input: string; method?: string; body?: unknown } | undefined;
   const project = await createProject({ name: "Payments API", slug: "payments-api" }, async (input, init) => {

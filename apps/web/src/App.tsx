@@ -329,7 +329,7 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
         <Metric value="100%" label="encrypted" accent />
         <Metric value="0" label="open alerts" />
       </section>
-      <section className="secret-toolbar project-filters" aria-label="Filter projects"><label className="secret-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search projects</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects or tags" /></label><div className="tag-filters"><button type="button" className={activeTag === null ? "active" : ""} onClick={() => setActiveTag(null)}>All</button>{tags.map((tag) => <button type="button" key={tag} className={activeTag === tag ? "active" : ""} onClick={() => setActiveTag(tag)}>#{tag}</button>)}</div><span className="row-count">{visibleProjects.length} / {projects.length}</span></section>
+      {projects.length === 0 ? <FirstRunChecklist onCreate={() => setCreating(true)} /> : <><section className="secret-toolbar project-filters" aria-label="Filter projects"><label className="secret-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search projects</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects or tags" /></label><div className="tag-filters"><button type="button" className={activeTag === null ? "active" : ""} onClick={() => setActiveTag(null)}>All</button>{tags.map((tag) => <button type="button" key={tag} className={activeTag === tag ? "active" : ""} onClick={() => setActiveTag(tag)}>#{tag}</button>)}</div><span className="row-count">{visibleProjects.length} / {projects.length}</span></section>
       <section className="project-grid" aria-label="Projects">
         {visibleProjects.map((project, index) => (
           <NavLink className="project-card" to={`/app/projects/${project.id}`} key={project.id}>
@@ -340,9 +340,13 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
             <footer><span>{project.secrets.length} indexed keys</span><span>View project →</span></footer>
           </NavLink>
         ))}
-      </section>
+      </section></>}
     </div>
   );
+}
+
+function FirstRunChecklist({ onCreate }: { onCreate: () => void }): ReactNode {
+  return <section className="onboarding-panel" aria-labelledby="onboarding-heading"><header><span className="kicker">First-run checklist</span><h2 id="onboarding-heading">Build your first encrypted workflow.</h2><p>Four small steps take a new organization from an empty workspace to CI-ready secret delivery.</p></header><ol><li className="complete"><i>✓</i><span><strong>Organization ready</strong><small>Your tenant boundary and audit trail are active.</small></span></li><li className="current"><i>2</i><span><strong>Create a project</strong><small>Projects group environments and their encrypted configuration.</small></span><button className="primary-button" type="button" onClick={onCreate}>Create first project</button></li><li><i>3</i><span><strong>Import your .env</strong><small>Open the project and use Bulk paste to preview before writing.</small></span></li><li><i>4</i><span><strong>Connect CI or runtime</strong><small>Create a scoped read-only API key in Settings, then use the CLI or runtime endpoint.</small></span></li></ol><footer><span>The repository guide mirrors this checklist with copy-ready CLI and CI commands.</span><NavLink to="/app/settings">Prepare CI access →</NavLink></footer></section>;
 }
 
 function ProjectLanding({ projects }: { projects: readonly ProjectQuickLink[] }): ReactNode {

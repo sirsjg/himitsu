@@ -586,7 +586,9 @@ export function SecretWorkspace({
               <div className="row-actions" role="cell"><button type="button" aria-label={`Copy ${secret.key}`} title="Copy value" onClick={() => void copy(secret)}>⧉</button><button type="button" aria-label={`Edit ${secret.key}`} title="Edit secret" onClick={() => setEditor({ mode: "edit", secret })}>✎</button></div>
             </div>
           ))}
-          {visibleSecrets.length === 0 ? <div className="secret-empty"><span>∅</span><strong>No matching secrets</strong><p>Clear the search or tag filter, or add a secret to this environment.</p></div> : null}
+          {visibleSecrets.length === 0 ? environmentSecrets.length === 0 && query.trim() === "" && activeTag === null
+            ? <div className="secret-empty"><span>◇</span><strong>This environment is ready for its first secret.</strong><p>Add one key manually or import your .env with a reviewable preview.</p><div><button className="primary-button" type="button" onClick={() => setEditor({ mode: "add" })}>Add first secret</button><button className="secondary-button" type="button" onClick={() => setBulkOpen(true)}>Import your .env</button></div></div>
+            : <div className="secret-empty"><span>∅</span><strong>No matching secrets</strong><p>Clear the search or tag filter, or add a secret to this environment.</p></div> : null}
         </div>
         <footer className="secret-panel-foot"><span><i /> Values are encrypted at rest and masked by default</span><span>{environment?.protected ? "Protected environment · elevated writes only" : "Standard write policy"}</span></footer>
       </section>

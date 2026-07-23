@@ -11,6 +11,8 @@
   },
   "scripts": {
     "build": "./scripts/build-all.sh",
+    "docs:check": "node scripts/check-docs.mjs",
+    "docs:openapi": "node scripts/generate-openapi.mjs",
     "test": "npm run test --workspaces --if-present",
     "test:e2e": "npm run test:e2e --workspace @himitsu/web",
     "test:postgres": "./scripts/test-postgres-all.sh",
