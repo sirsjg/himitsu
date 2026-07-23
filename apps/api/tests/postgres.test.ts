@@ -10,7 +10,7 @@ import { ConsistencyService } from "@himitsu/consistency";
 import { EnvironmentService } from "@himitsu/environments";
 import { ProjectService } from "@himitsu/projects";
 import { SecretService } from "@himitsu/secrets";
-import { TenantDatabase } from "@himitsu/tenancy";
+import { TenantDatabase, TenancyService } from "@himitsu/tenancy";
 import { Pool } from "pg";
 import { apiRoutePermissions, buildApi, securityHeaders } from "../src/index.js";
 
@@ -24,6 +24,10 @@ const adminPool = new Pool({ connectionString: adminConnectionString, max: 2 });
 const appPool = new Pool({ connectionString: appConnectionString, max: 10 });
 const database = new TenantDatabase(appPool);
 const audit = new TransactionalAuditLog(appPool);
+const deliveredInvitations: Array<{ email: string; token: string }> = [];
+const tenancy = new TenancyService(database, {
+  async sendOrganizationInvitation({ email, token }) { deliveredInvitations.push({ email, token }); },
+}, audit);
 const auth = new AuthService(appPool, {
   async sendEmailVerification() {},
   async sendPasswordReset() {},
@@ -54,6 +58,7 @@ const secrets = new SecretService(
 const consistency = new ConsistencyService(resolver, secrets, audit);
 const app = await buildApi({
   database,
+  tenancy,
   auth,
   apiKeys,
   audit,
@@ -155,6 +160,9 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
     "/api/v1/secrets/{secretId}/versions",
     "/api/v1/tags",
     "/api/v1/api-keys",
+    "/api/v1/organization",
+    "/api/v1/members",
+    "/api/v1/invitations",
   ]) assert.ok(document.paths[path], `OpenAPI path missing: ${path}`);
   const operationIds = Object.values(document.paths).flatMap((methods) =>
     Object.values(methods).map(({ operationId }) => operationId).filter(Boolean),
@@ -344,6 +352,92 @@ test("exposes paginated project, environment, and tag CRUD", async () => {
   });
   assert.equal(updatedTag.statusCode, 200, updatedTag.body);
   assert.equal(updatedTag.json().data.name, "datastore");
+});
+
+test("manages organization profile, members, invitations, and role safety", async () => {
+  const organization = await app.inject({ method: "GET", url: "/api/v1/organization", headers: headers(orgA, readerA) });
+  assert.equal(organization.statusCode, 200, organization.body);
+  assert.equal(organization.json().data.slug, "api-alpha");
+  assert.equal(organization.json().data.retentionDays, 90);
+
+  const deniedProfile = await app.inject({
+    method: "PATCH", url: "/api/v1/organization", headers: headers(orgA, memberA),
+    payload: { name: "Denied" },
+  });
+  assert.equal(deniedProfile.statusCode, 403, deniedProfile.body);
+  const updatedProfile = await app.inject({
+    method: "PATCH", url: "/api/v1/organization", headers: headers(orgA, ownerA),
+    payload: { name: "API Alpha Settings", slug: "api-alpha-settings" },
+  });
+  assert.equal(updatedProfile.statusCode, 200, updatedProfile.body);
+  assert.equal(updatedProfile.json().data.name, "API Alpha Settings");
+
+  const members = await app.inject({ method: "GET", url: "/api/v1/members", headers: headers(orgA, readerA) });
+  assert.equal(members.statusCode, 200, members.body);
+  assert.ok(members.json().data.length >= 3);
+  assert.equal(members.json().data.find(({ userId }: { userId: string }) => userId === ownerA).role, "owner");
+
+  const changedRole = await app.inject({
+    method: "PATCH", url: `/api/v1/members/${memberA}`, headers: headers(orgA, ownerA),
+    payload: { role: "read_only" },
+  });
+  assert.equal(changedRole.statusCode, 200, changedRole.body);
+  assert.equal(changedRole.json().data.role, "read_only");
+  const ownerProtected = await app.inject({
+    method: "DELETE", url: `/api/v1/members/${ownerA}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(ownerProtected.statusCode, 400, ownerProtected.body);
+  assert.equal(ownerProtected.json().error.code, "SELF_REMOVAL_FORBIDDEN");
+  const restoredRole = await app.inject({
+    method: "PATCH", url: `/api/v1/members/${memberA}`, headers: headers(orgA, ownerA),
+    payload: { role: "member" },
+  });
+  assert.equal(restoredRole.statusCode, 200, restoredRole.body);
+
+  const removableUser = randomUUID();
+  await adminPool.query("INSERT INTO users (id, email, email_verified_at) VALUES ($1, 'removable@example.com', now())", [removableUser]);
+  await adminPool.query("INSERT INTO memberships (org_id, user_id, role) VALUES ($1, $2, 'member')", [orgA, removableUser]);
+  const removed = await app.inject({
+    method: "DELETE", url: `/api/v1/members/${removableUser}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(removed.statusCode, 200, removed.body);
+  assert.equal(removed.json().data.email, "removable@example.com");
+
+  const deniedInvite = await app.inject({
+    method: "POST", url: "/api/v1/invitations", headers: headers(orgA, readerA),
+    payload: { email: "pending@example.com", role: "member" },
+  });
+  assert.equal(deniedInvite.statusCode, 403, deniedInvite.body);
+  const invited = await app.inject({
+    method: "POST", url: "/api/v1/invitations", headers: headers(orgA, ownerA),
+    payload: { email: "Pending@Example.com", role: "read_only" },
+  });
+  assert.equal(invited.statusCode, 201, invited.body);
+  assert.deepEqual(invited.json().data, { email: "pending@example.com", role: "read_only" });
+  assert.equal(deliveredInvitations.at(-1)?.email, "pending@example.com");
+  const invitations = await app.inject({ method: "GET", url: "/api/v1/invitations", headers: headers(orgA, readerA) });
+  assert.equal(invitations.statusCode, 200, invitations.body);
+  assert.equal(invitations.json().data.length, 1);
+  assert.equal("token" in invitations.json().data[0], false);
+  const revoked = await app.inject({
+    method: "DELETE", url: `/api/v1/invitations/${invitations.json().data[0].id}`, headers: headers(orgA, ownerA),
+  });
+  assert.equal(revoked.statusCode, 200, revoked.body);
+
+  const restoredProfile = await app.inject({
+    method: "PATCH", url: "/api/v1/organization", headers: headers(orgA, ownerA),
+    payload: { name: "API Alpha", slug: "api-alpha" },
+  });
+  assert.equal(restoredProfile.statusCode, 200, restoredProfile.body);
+  const evidence = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{ action: string }>(
+    `SELECT action FROM audit_events WHERE action IN
+      ('organization.updated', 'membership.role_changed', 'membership.removed', 'membership.invited', 'membership.invitation_revoked')
+     ORDER BY id`,
+  ));
+  assert.deepEqual(evidence.rows.map(({ action }) => action), [
+    "organization.updated", "membership.role_changed", "membership.role_changed", "membership.removed",
+    "membership.invited", "membership.invitation_revoked", "organization.updated",
+  ]);
 });
 
 test("exposes secret create, update, bulk set/get, delete, and version metadata", async () => {
@@ -1108,7 +1202,7 @@ test("manages scoped API keys while revealing token material only at creation", 
   });
 
   const limitedApp = await buildApi({
-    database, auth, apiKeys, audit, projects, environments, secrets, consistency,
+    database, tenancy, auth, apiKeys, audit, projects, environments, secrets, consistency,
     rateLimits: { perIp: 100, perApiKey: 1 },
   });
   const firstLimited = await limitedApp.inject({

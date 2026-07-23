@@ -18,7 +18,14 @@ import {
 } from "@himitsu/imports";
 import { ProjectError, type ProjectService } from "@himitsu/projects";
 import { SecretError, type SecretService } from "@himitsu/secrets";
-import { TenancyError, type TenantDatabase, type TenantTransaction } from "@himitsu/tenancy";
+import {
+  normalizeOrganizationSlug,
+  TenancyError,
+  type OrganizationRole,
+  type TenantDatabase,
+  type TenantTransaction,
+  type TenancyService,
+} from "@himitsu/tenancy";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
 export type ApiActor =
@@ -41,6 +48,7 @@ export interface ApiRateLimitOptions {
 
 export interface ApiDependencies {
   readonly database: TenantDatabase;
+  readonly tenancy: TenancyService;
   readonly auth: AuthService;
   readonly apiKeys: ApiKeyService;
   readonly audit: TransactionalAuditLog;
@@ -74,6 +82,8 @@ export class ApiError extends Error {
 
 interface IdParams {
   apiKeyId?: string;
+  invitationId?: string;
+  memberId?: string;
   projectId?: string;
   environmentId?: string;
   secretId?: string;
@@ -336,6 +346,33 @@ const createdApiKeySchema = {
   type: "object", additionalProperties: false, required: ["apiKey", "token"],
   properties: { apiKey: apiKeySchema, token: { type: "string", pattern: "^himi_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$" } },
 } as const;
+const organizationSchema = {
+  type: "object", additionalProperties: false,
+  required: ["id", "name", "slug", "retentionDays", "createdAt", "updatedAt"],
+  properties: {
+    id: uuid, name: { type: "string" }, slug: { type: "string" }, retentionDays: { type: "integer" },
+    createdAt: dateTime, updatedAt: dateTime,
+  },
+} as const;
+const memberSchema = {
+  type: "object", additionalProperties: false,
+  required: ["userId", "email", "role", "status", "createdAt", "updatedAt"],
+  properties: {
+    userId: uuid, email: { type: "string", format: "email" },
+    role: { type: "string", enum: ["owner", "admin", "member", "read_only"] },
+    status: { type: "string", enum: ["invited", "active", "suspended"] },
+    createdAt: dateTime, updatedAt: dateTime,
+  },
+} as const;
+const invitationSchema = {
+  type: "object", additionalProperties: false,
+  required: ["id", "email", "role", "createdAt", "expiresAt"],
+  properties: {
+    id: uuid, email: { type: "string", format: "email" },
+    role: { type: "string", enum: ["admin", "member", "read_only"] },
+    createdAt: dateTime, expiresAt: dateTime,
+  },
+} as const;
 const stringMapSchema = { type: "object", additionalProperties: { type: "string" } } as const;
 const runtimeConfigSchema = {
   type: "object", additionalProperties: false, required: ["configVersion", "secrets"],
@@ -426,6 +463,14 @@ const auditFilterProperties = {
 } as const;
 
 export const apiRoutePermissions = Object.freeze({
+  getOrganization: "org.settings.read",
+  updateOrganization: "org.settings.update",
+  listMembers: "org.members.read",
+  updateMember: "org.members.manage",
+  removeMember: "org.members.manage",
+  listInvitations: "org.members.read",
+  inviteMember: "org.members.invite",
+  revokeInvitation: "org.members.invite",
   listProjects: "project.read",
   createProject: "project.create",
   getProject: "project.read",
@@ -678,6 +723,8 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
       },
       tags: [
         { name: "auth" },
+        { name: "organization" },
+        { name: "members" },
         { name: "projects" },
         { name: "environments" },
         { name: "secrets" },
@@ -903,6 +950,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     ),
   })));
 
+  registerOrganizationRoutes(app, dependencies, withTenant);
   registerEnvironmentRoutes(app, dependencies, withTenant);
   registerSecretRoutes(app, dependencies, withTenant);
   registerAuditRoutes(app, dependencies, withTenant);
@@ -928,6 +976,227 @@ interface AuditQuery {
   resource?: string;
   cursor?: string;
   limit?: number;
+}
+
+interface OrganizationRow {
+  id: string;
+  name: string;
+  slug: string;
+  audit_retention_days: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface MemberRow {
+  user_id: string;
+  email: string;
+  role: OrganizationRole;
+  status: "invited" | "active" | "suspended";
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface InvitationRow {
+  id: string;
+  email: string;
+  role: Exclude<OrganizationRole, "owner">;
+  created_at: Date;
+  expires_at: Date;
+}
+
+function organizationFromRow(row: OrganizationRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    retentionDays: row.audit_retention_days,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function memberFromRow(row: MemberRow) {
+  return {
+    userId: row.user_id,
+    email: row.email,
+    role: row.role,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function invitationFromRow(row: InvitationRow) {
+  return { id: row.id, email: row.email, role: row.role, createdAt: row.created_at, expiresAt: row.expires_at };
+}
+
+function validateMemberChange(actorRole: OrganizationRole, target: MemberRow, desiredRole?: OrganizationRole): void {
+  if (target.role === "owner") throw new ApiError(400, "OWNER_PROTECTED", "The organization owner cannot be changed or removed");
+  if (actorRole === "admin" && (target.role === "admin" || desiredRole === "admin" || desiredRole === "owner")) {
+    throw new ApiError(403, "FORBIDDEN", "Administrators cannot manage other administrators or owners");
+  }
+  if (desiredRole === "owner") throw new ApiError(400, "OWNER_TRANSFER_REQUIRED", "Owner transfer requires a dedicated ownership workflow");
+}
+
+function registerOrganizationRoutes(
+  app: FastifyInstance,
+  dependencies: ApiDependencies,
+  withTenant: WithTenant,
+): void {
+  const organizationSelect = `SELECT id, name, slug, audit_retention_days, created_at, updated_at
+    FROM organizations WHERE id = $1 AND deleted_at IS NULL`;
+  const memberSelect = `SELECT m.user_id, u.email, m.role, m.status, m.created_at, m.updated_at
+    FROM memberships m JOIN users u ON u.id = m.user_id`;
+
+  app.get("/api/v1/organization", {
+    schema: { operationId: "getOrganization", tags: ["organization"], response: apiResponses(organizationSchema) },
+  }, async (request) => withTenant(request, async (transaction) => {
+    const result = await transaction.query<OrganizationRow>(organizationSelect, [transaction.orgId]);
+    const row = result.rows[0];
+    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Organization not found");
+    return { data: organizationFromRow(row) };
+  }));
+
+  app.patch("/api/v1/organization", {
+    schema: {
+      operationId: "updateOrganization", tags: ["organization"],
+      body: { type: "object", additionalProperties: false, minProperties: 1, properties: {
+        name: { type: "string", minLength: 1, maxLength: 120 },
+        slug: { type: "string", minLength: 1, maxLength: 80, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+      } },
+      response: apiResponses(organizationSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const input = request.body as { name?: string; slug?: string };
+    const current = await transaction.query<OrganizationRow>(`${organizationSelect} FOR UPDATE`, [transaction.orgId]);
+    const before = current.rows[0];
+    if (before === undefined) throw new ApiError(404, "NOT_FOUND", "Organization not found");
+    const name = input.name?.trim() ?? before.name;
+    if (name.length < 1 || name.length > 120) throw new ApiError(400, "INVALID_INPUT", "Organization name must be between 1 and 120 characters");
+    const slug = input.slug === undefined ? before.slug : normalizeOrganizationSlug(input.slug);
+    const updated = await transaction.query<OrganizationRow>(
+      `UPDATE organizations SET name = $1, slug = $2, updated_at = now() WHERE id = $3
+       RETURNING id, name, slug, audit_retention_days, created_at, updated_at`,
+      [name, slug, transaction.orgId],
+    );
+    const row = updated.rows[0];
+    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Organization not found");
+    await dependencies.audit.recordInTransaction(transaction, {
+      orgId: transaction.orgId,
+      actor: { type: "user", id: context.userId },
+      action: "organization.updated",
+      resource: { type: "organization", id: transaction.orgId },
+      before: { name: before.name, slug: before.slug },
+      after: { name: row.name, slug: row.slug },
+    });
+    return { data: organizationFromRow(row) };
+  }));
+
+  app.get("/api/v1/members", {
+    schema: { operationId: "listMembers", tags: ["members"], response: apiResponses(listSchema(memberSchema), true) },
+  }, async (request) => withTenant(request, async (transaction) => {
+    const result = await transaction.query<MemberRow>(`${memberSelect} WHERE m.status = 'active' ORDER BY lower(u.email), m.user_id`);
+    return { data: result.rows.map(memberFromRow), meta: { total: result.rowCount, limit: result.rowCount, offset: 0 } };
+  }));
+
+  app.patch("/api/v1/members/:memberId", {
+    schema: {
+      operationId: "updateMember", tags: ["members"], params: idParams({ memberId: uuid }),
+      body: { type: "object", additionalProperties: false, required: ["role"], properties: {
+        role: { type: "string", enum: ["admin", "member", "read_only"] },
+      } },
+      response: apiResponses(memberSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const actor = await transaction.query<{ role: OrganizationRole }>(
+      "SELECT role FROM memberships WHERE user_id = $1 AND status = 'active'", [context.userId],
+    );
+    const targetResult = await transaction.query<MemberRow>(`${memberSelect} WHERE m.user_id = $1 AND m.status = 'active' FOR UPDATE OF m`, [params(request).memberId]);
+    const target = targetResult.rows[0];
+    if (target === undefined) throw new ApiError(404, "NOT_FOUND", "Member not found");
+    const role = (request.body as { role: Exclude<OrganizationRole, "owner"> }).role;
+    validateMemberChange(actor.rows[0]?.role ?? "read_only", target, role);
+    await transaction.query("UPDATE memberships SET role = $1, updated_at = now() WHERE user_id = $2", [role, target.user_id]);
+    const updated = await transaction.query<MemberRow>(`${memberSelect} WHERE m.user_id = $1`, [target.user_id]);
+    const row = updated.rows[0];
+    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Member not found");
+    await dependencies.audit.recordInTransaction(transaction, {
+      orgId: transaction.orgId, actor: { type: "user", id: context.userId },
+      action: "membership.role_changed", resource: { type: "membership", id: row.user_id },
+      before: { role: target.role }, after: { role: row.role },
+    });
+    return { data: memberFromRow(row) };
+  }));
+
+  app.delete("/api/v1/members/:memberId", {
+    schema: { operationId: "removeMember", tags: ["members"], params: idParams({ memberId: uuid }), response: apiResponses(memberSchema) },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const memberId = params(request).memberId ?? "";
+    if (memberId === context.userId) throw new ApiError(400, "SELF_REMOVAL_FORBIDDEN", "Use the leave-organization workflow to remove your own membership");
+    const actor = await transaction.query<{ role: OrganizationRole }>(
+      "SELECT role FROM memberships WHERE user_id = $1 AND status = 'active'", [context.userId],
+    );
+    const targetResult = await transaction.query<MemberRow>(`${memberSelect} WHERE m.user_id = $1 AND m.status = 'active' FOR UPDATE OF m`, [memberId]);
+    const target = targetResult.rows[0];
+    if (target === undefined) throw new ApiError(404, "NOT_FOUND", "Member not found");
+    validateMemberChange(actor.rows[0]?.role ?? "read_only", target);
+    await transaction.query("UPDATE sessions SET active_org_id = NULL WHERE user_id = $1 AND active_org_id = $2", [memberId, transaction.orgId]);
+    await transaction.query("DELETE FROM memberships WHERE user_id = $1", [memberId]);
+    await dependencies.audit.recordInTransaction(transaction, {
+      orgId: transaction.orgId, actor: { type: "user", id: context.userId },
+      action: "membership.removed", resource: { type: "membership", id: memberId }, before: { role: target.role },
+    });
+    return { data: memberFromRow(target) };
+  }));
+
+  app.get("/api/v1/invitations", {
+    schema: { operationId: "listInvitations", tags: ["members"], response: apiResponses(listSchema(invitationSchema), true) },
+  }, async (request) => withTenant(request, async (transaction) => {
+    const result = await transaction.query<InvitationRow>(
+      `SELECT id, email, role, created_at, expires_at FROM organization_invitations
+       WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now() ORDER BY created_at DESC, id`,
+    );
+    return { data: result.rows.map(invitationFromRow), meta: { total: result.rowCount, limit: result.rowCount, offset: 0 } };
+  }));
+
+  app.post("/api/v1/invitations", {
+    schema: {
+      operationId: "inviteMember", tags: ["members"],
+      body: { type: "object", additionalProperties: false, required: ["email", "role"], properties: {
+        email: { type: "string", format: "email", maxLength: 320 },
+        role: { type: "string", enum: ["admin", "member", "read_only"] },
+      } },
+      response: apiResponses({ type: "object", additionalProperties: false, required: ["email", "role"], properties: {
+        email: { type: "string", format: "email" }, role: { type: "string", enum: ["admin", "member", "read_only"] },
+      } }),
+    },
+  }, async (request, reply) => {
+    const input = request.body as { email: string; role: Exclude<OrganizationRole, "owner"> };
+    const result = await withTenant(request, async (transaction, context) => {
+      await dependencies.tenancy.inviteMember({ orgId: transaction.orgId, inviterUserId: context.userId, ...input });
+      return { email: input.email.trim().toLocaleLowerCase(), role: input.role };
+    });
+    return reply.status(201).send({ data: result });
+  });
+
+  app.delete("/api/v1/invitations/:invitationId", {
+    schema: { operationId: "revokeInvitation", tags: ["members"], params: idParams({ invitationId: uuid }), response: apiResponses(invitationSchema) },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const revoked = await transaction.query<InvitationRow>(
+      `UPDATE organization_invitations SET revoked_at = now()
+       WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+       RETURNING id, email, role, created_at, expires_at`,
+      [params(request).invitationId],
+    );
+    const row = revoked.rows[0];
+    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Pending invitation not found");
+    await dependencies.audit.recordInTransaction(transaction, {
+      orgId: transaction.orgId, actor: { type: "user", id: context.userId },
+      action: "membership.invitation_revoked", resource: { type: "organization_invitation", id: row.id },
+      before: { email: row.email, role: row.role },
+    });
+    return { data: invitationFromRow(row) };
+  }));
 }
 
 function auditFilters(query: AuditQuery): AuditEventFilters {

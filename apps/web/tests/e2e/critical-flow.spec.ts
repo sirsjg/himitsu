@@ -8,11 +8,22 @@ async function json(route: Route, data: unknown, status = 200): Promise<void> {
 
 async function installApi(page: Page): Promise<void> {
   const keys = new Set<string>();
+  const serviceKeys: Array<Record<string, unknown>> = [];
   let nextSecret = 1;
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === "/api/v1/auth/login") return json(route, {});
+    if (path === "/api/v1/organization") return json(route, { id: "org-studio", name: "Northstar Studio", slug: "northstar-studio", retentionDays: 90, createdAt: now, updatedAt: now });
+    if (path === "/api/v1/members") return json(route, [{ userId: "e2e-user", email: "owner@example.com", role: "owner", status: "active", createdAt: now, updatedAt: now }]);
+    if (path === "/api/v1/invitations") return json(route, []);
+    if (path === "/api/v1/api-keys" && request.method() === "GET") return json(route, serviceKeys);
+    if (path === "/api/v1/api-keys" && request.method() === "POST") {
+      const body = request.postDataJSON() as { name: string; access: string };
+      const apiKey = { id: "e2e-key", projectId: null, environmentId: null, name: body.name, prefix: "himi_0123456789abcdef", access: body.access, createdAt: now, expiresAt: null, lastUsedAt: null, revokedAt: null };
+      serviceKeys.push(apiKey);
+      return json(route, { apiKey, token: "himi_0123456789abcdef_abcdefghijklmnopqrstuvwxyzABCDEFGH123456789" }, 201);
+    }
     if (path === "/api/v1/projects" && request.method() === "POST") {
       return json(route, { id: "e2e-project", name: "E2E Vault", slug: "e2e-vault", tags: [] }, 201);
     }
@@ -75,7 +86,7 @@ async function installApi(page: Page): Promise<void> {
   });
 }
 
-test("login, project creation, secret writes, dotenv import, diff, and audit log", async ({ page }) => {
+test("login, project creation, secret writes, dotenv import, diff, audit, and settings", async ({ page }) => {
   await installApi(page);
   await page.goto("/login");
   await page.getByLabel("Work email").fill("owner@example.com");
@@ -112,4 +123,15 @@ test("login, project creation, secret writes, dotenv import, diff, and audit log
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
   await expect(page.locator("code").filter({ hasText: "secret.imported" })).toBeVisible();
   await expect(page.getByText("owner@example.com")).toBeVisible();
+
+  await page.getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members & invitations" })).toBeVisible();
+  await expect(page.getByText("owner@example.com")).toBeVisible();
+  const keyForm = page.getByRole("form", { name: "Create API key" });
+  await keyForm.getByLabel("Name").fill("E2E deploy");
+  await keyForm.getByRole("button", { name: "Create key" }).click();
+  await expect(page.getByRole("alert")).toContainText("Copy E2E deploy now");
+  await expect(page.getByRole("alert").locator("code")).toContainText("himi_0123456789abcdef_");
+  await expect(page.getByRole("heading", { name: "Import & export" })).toBeVisible();
 });

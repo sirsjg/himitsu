@@ -87,7 +87,8 @@ export const demoAuditEvents: readonly AuditEventView[] = [
 const actionOptions = [
   "", "secret.created", "secret.read", "secret.updated", "secret.deleted", "secret.imported", "secret.exported",
   "project.created", "project.updated", "environment.created", "environment.updated", "api_key.created", "api_key.revoked",
-  "organization.audit_retention_updated",
+  "organization.updated", "organization.audit_retention_updated", "membership.invited", "membership.invitation_revoked",
+  "membership.role_changed", "membership.removed",
 ] as const;
 
 export function AuditPage({

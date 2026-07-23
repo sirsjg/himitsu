@@ -8,7 +8,7 @@ import { LocalMasterKey } from "@himitsu/crypto";
 import { EnvironmentService } from "@himitsu/environments";
 import { ProjectService } from "@himitsu/projects";
 import { SecretService } from "@himitsu/secrets";
-import { TenantDatabase } from "@himitsu/tenancy";
+import { TenantDatabase, TenancyService } from "@himitsu/tenancy";
 import { Pool } from "pg";
 import { buildApi } from "./index.js";
 
@@ -38,13 +38,15 @@ async function masterKey(): Promise<string> {
 const pool = new Pool({ connectionString: required("DATABASE_URL"), max: positiveInteger(process.env.DATABASE_POOL_SIZE, 20, "DATABASE_POOL_SIZE") });
 const audit = new TransactionalAuditLog(pool);
 const resolver = new AuthorizationContextResolver();
+const database = new TenantDatabase(pool);
 const secrets = new SecretService(
   resolver,
   audit,
   LocalMasterKey.fromBase64(process.env.HIMITSU_MASTER_KEY_ID?.trim() || "local-v1", await masterKey()),
 );
 const app = await buildApi({
-  database: new TenantDatabase(pool),
+  database,
+  tenancy: new TenancyService(database, { async sendOrganizationInvitation() {} }, audit),
   auth: new AuthService(pool, { async sendEmailVerification() {}, async sendPasswordReset() {} }),
   apiKeys: new ApiKeyService(pool, resolver, audit),
   audit,

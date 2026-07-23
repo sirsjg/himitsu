@@ -20,6 +20,7 @@ import {
   promotionMarker,
 } from "../src/SecretWorkspace.js";
 import { createAuditClient } from "../src/AuditPage.js";
+import { createSettingsClient } from "../src/SettingsPage.js";
 
 function renderRoute(path: string): string {
   return renderToStaticMarkup(
@@ -150,6 +151,67 @@ test("audit client preserves filters, cursors, export formats, and retention wri
   assert.match(calls[0]?.input ?? "", /cursor=next-page/);
   assert.match(calls[1]?.input ?? "", /format=csv/);
   assert.deepEqual(calls[3], { input: "/api/v1/audit-settings", method: "PATCH", body: { retentionDays: 365 } });
+});
+
+test("settings route exposes governed members, keys, tags, policy, and transfer entry points", () => {
+  const html = renderRoute("/app/settings");
+  assert.match(html, /Members &amp; invitations/);
+  assert.match(html, /Send invite/);
+  assert.match(html, /API keys/);
+  assert.match(html, /Plaintext is revealed exactly once/);
+  assert.match(html, /Tag registry/);
+  assert.match(html, /Profile &amp; retention/);
+  assert.match(html, /Import &amp; export/);
+  assert.match(html, /Atlas API/);
+  assert.doesNotMatch(html, /himi_[0-9a-f]{16}_/);
+
+  const readOnly = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/settings"]}><AppRoutes organizations={[{ id: "reader-org", name: "Reader Org", role: "read_only" }]} /></MemoryRouter>);
+  assert.match(readOnly, /Read-only settings view/);
+  assert.doesNotMatch(readOnly, /Send invite/);
+  assert.doesNotMatch(readOnly, />Create key</);
+  assert.doesNotMatch(readOnly, />Save profile</);
+});
+
+test("settings client targets every organization administration contract", async () => {
+  const calls: Array<{ input: string; method: string; body?: unknown }> = [];
+  const client = createSettingsClient(async (input, init) => {
+    calls.push({ input, method: init?.method ?? "GET", ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) });
+    const data = input === "/api/v1/audit-settings"
+      ? { retentionDays: init?.method === "PATCH" ? 365 : 90 }
+      : input.includes("/api-keys") && init?.method === "POST"
+        ? { apiKey: { id: "key-id", name: "Deploy" }, token: "himi_0123456789abcdef_abcdefghijklmnopqrstuvwxyzABCDEFGH123456789" }
+        : input.includes("/environments") || (init?.method ?? "GET") === "GET"
+          ? []
+          : { id: "result" };
+    return new Response(JSON.stringify({ data }), { status: init?.method === "POST" ? 201 : 200, headers: { "content-type": "application/json" } });
+  });
+
+  await client.organization();
+  await client.updateOrganization({ name: "Northstar", slug: "northstar" });
+  await client.members();
+  await client.updateMember("member/id", "admin");
+  await client.removeMember("member/id");
+  await client.invitations();
+  await client.invite({ email: "dev@example.com", role: "member" });
+  await client.revokeInvitation("invite/id");
+  await client.apiKeys();
+  await client.createApiKey({ name: "Deploy", access: "read_only", projectId: "project/id", environmentId: "environment/id", expiresAt: null });
+  await client.revokeApiKey("key/id");
+  await client.tags();
+  await client.createTag({ name: "pci", color: "#7C3AED" });
+  await client.updateTag("tag/id", { name: "compliance", color: "#2563EB" });
+  await client.deleteTag("tag/id");
+  assert.equal(await client.retention(), 90);
+  assert.equal(await client.updateRetention(365), 365);
+  await client.environments("project/id");
+
+  assert.deepEqual(calls.find(({ input, method }) => input === "/api/v1/organization" && method === "PATCH")?.body, { name: "Northstar", slug: "northstar" });
+  assert.ok(calls.some(({ input, method }) => input === "/api/v1/members/member%2Fid" && method === "DELETE"));
+  assert.deepEqual(calls.find(({ input, method }) => input === "/api/v1/invitations" && method === "POST")?.body, { email: "dev@example.com", role: "member" });
+  assert.deepEqual(calls.find(({ input, method }) => input === "/api/v1/api-keys" && method === "POST")?.body, { name: "Deploy", access: "read_only", projectId: "project/id", environmentId: "environment/id", expiresAt: null });
+  assert.ok(calls.some(({ input, method }) => input === "/api/v1/tags/tag%2Fid" && method === "PATCH"));
+  assert.deepEqual(calls.find(({ input, method }) => input === "/api/v1/audit-settings" && method === "PATCH")?.body, { retentionDays: 365 });
+  assert.ok(calls.some(({ input }) => input === "/api/v1/projects/project%2Fid/environments?limit=100"));
 });
 
 test("bulk paste parses dotenv values and reports malformed or duplicate entries", () => {

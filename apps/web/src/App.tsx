@@ -19,6 +19,7 @@ import {
 } from "react-router-dom";
 import { SecretWorkspace } from "./SecretWorkspace.js";
 import { AuditPage } from "./AuditPage.js";
+import { SettingsPage } from "./SettingsPage.js";
 
 export interface OrganizationOption {
   readonly id: string;
@@ -145,7 +146,7 @@ export function AppRoutes({
         <Route path="projects" element={<ProjectsPage projects={projectList} onCreated={addProject} />} />
         <Route path="projects/:projectId" element={<ProjectLanding projects={projectList} />} />
         <Route path="audit" element={<AuditRoute />} />
-        <Route path="settings" element={<SectionPage eyebrow="Workspace" title="Settings" copy="Manage members, access, service credentials, tags, and organization policy." />} />
+        <Route path="settings" element={<SettingsRoute projects={projectList} />} />
       </Route>
       <Route path="*" element={<Navigate to="/app/projects" replace />} />
     </Routes>
@@ -252,6 +253,11 @@ function AppShell({
 function AuditRoute(): ReactNode {
   const { role } = useOutletContext<{ role: OrganizationOption["role"] }>();
   return <AuditPage role={role} />;
+}
+
+function SettingsRoute({ projects }: { projects: readonly ProjectQuickLink[] }): ReactNode {
+  const { role } = useOutletContext<{ role: OrganizationOption["role"] }>();
+  return <SettingsPage role={role} projects={projects.map(({ id, name }) => ({ id, name }))} />;
 }
 
 function NavigationLink({ to, label, icon }: { to: string; label: string; icon: IconName }): ReactNode {

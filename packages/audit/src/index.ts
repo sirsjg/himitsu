@@ -2,6 +2,7 @@ import type { Pool, QueryResult, QueryResultRow } from "pg";
 
 export type AuditAction =
   | "organization.created"
+  | "organization.updated"
   | "organization.audit_retention_updated"
   | "auth.signup"
   | "auth.email_verified"
@@ -34,6 +35,7 @@ export type AuditAction =
   | "secret.imported"
   | "secret.promoted"
   | "membership.invited"
+  | "membership.invitation_revoked"
   | "membership.accepted"
   | "membership.removed"
   | "membership.role_changed"
