@@ -90,6 +90,27 @@ async function postJson(path: string, body: Readonly<Record<string, string>>): P
   }
 }
 
+export async function createProject(
+  input: { readonly name: string; readonly slug: string },
+  request: typeof fetch = fetch,
+): Promise<ProjectQuickLink> {
+  const response = await request("/api/v1/projects", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json().catch(() => null) as {
+    data?: { id?: string; name?: string; slug?: string };
+    error?: { message?: string };
+  } | null;
+  if (!response.ok) throw new Error(payload?.error?.message ?? "Project could not be created.");
+  if (payload?.data?.id === undefined || payload.data.name === undefined || payload.data.slug === undefined) {
+    throw new Error("Project response was incomplete.");
+  }
+  return { id: payload.data.id, name: payload.data.name, slug: payload.data.slug, secrets: [] };
+}
+
 export interface AppRoutesProps {
   readonly organizations?: readonly OrganizationOption[];
   readonly projects?: readonly ProjectQuickLink[];
@@ -101,16 +122,18 @@ export function AppRoutes({
   projects = demoProjects,
   user = { name: "Akari Mori", email: "akari@example.com" },
 }: AppRoutesProps): ReactNode {
+  const [projectList, setProjectList] = useState(projects);
+  const addProject = (project: ProjectQuickLink) => setProjectList((current) => [...current, project]);
   return (
     <Routes>
       <Route path="/login" element={<AuthPage mode="login" />} />
       <Route path="/signup" element={<AuthPage mode="signup" />} />
       <Route path="/password-reset" element={<AuthPage mode="password-reset" />} />
       <Route path="/invites/:token" element={<InvitePage />} />
-      <Route path="/app" element={<AppShell organizations={organizations} projects={projects} user={user} />}>
+      <Route path="/app" element={<AppShell organizations={organizations} projects={projectList} user={user} />}>
         <Route index element={<Navigate to="projects" replace />} />
-        <Route path="projects" element={<ProjectsPage projects={projects} />} />
-        <Route path="projects/:projectId" element={<ProjectLanding projects={projects} />} />
+        <Route path="projects" element={<ProjectsPage projects={projectList} onCreated={addProject} />} />
+        <Route path="projects/:projectId" element={<ProjectLanding projects={projectList} />} />
         <Route path="audit" element={<AuditRoute />} />
         <Route path="settings" element={<SectionPage eyebrow="Workspace" title="Settings" copy="Manage members, access, service credentials, tags, and organization policy." />} />
       </Route>
@@ -251,10 +274,35 @@ function CommandPalette({ items, onClose, onSelect }: {
   );
 }
 
-function ProjectsPage({ projects }: { projects: readonly ProjectQuickLink[] }): ReactNode {
+function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuickLink[]; onCreated: (project: ProjectQuickLink) => void }): ReactNode {
+  const navigate = useNavigate();
+  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    setBusy(true);
+    setError(null);
+    try {
+      const project = await createProject({ name: String(data.get("name") ?? ""), slug: String(data.get("slug") ?? "") });
+      onCreated(project);
+      navigate(`/app/projects/${project.id}`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Project could not be created.");
+      setBusy(false);
+    }
+  };
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Workspace" title="Projects" copy="Encrypted configuration, arranged around the way your systems move." action="New project" />
+      <PageHeader eyebrow="Workspace" title="Projects" copy="Encrypted configuration, arranged around the way your systems move." action="New project" onAction={() => setCreating(true)} />
+      {creating ? <form className="editor-sheet project-creator" aria-label="Create project" onSubmit={(event) => void submit(event)}>
+        <header><div><span className="kicker">New encrypted workspace</span><h2>Create a project</h2></div><button type="button" aria-label="Close project form" onClick={() => setCreating(false)}>×</button></header>
+        <label>Name<input name="name" required minLength={1} maxLength={120} autoFocus placeholder="Payments API" /></label>
+        <label>Slug<input name="slug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} placeholder="payments-api" /></label>
+        {error ? <p className="form-status error" role="alert">{error}</p> : null}
+        <footer><button className="secondary-button" type="button" onClick={() => setCreating(false)}>Cancel</button><button className="primary-button" type="submit" disabled={busy}>{busy ? "Creating…" : "Create project"}</button></footer>
+      </form> : null}
       <section className="signal-strip" aria-label="Workspace health">
         <Metric value={projects.length.toString().padStart(2, "0")} label="active projects" />
         <Metric value="03" label="environments" />
@@ -279,15 +327,17 @@ function ProjectLanding({ projects }: { projects: readonly ProjectQuickLink[] })
   const { projectId } = useParams();
   const project = projects.find(({ id }) => id === projectId);
   if (project === undefined) return <SectionPage eyebrow="Project" title="Project not found" copy="This project is not available in the active organization." />;
-  return <SecretWorkspace projectId={project.id} projectName={project.name} />;
+  return project.secrets.length === 0
+    ? <SecretWorkspace projectId={project.id} projectName={project.name} initialSecrets={[]} />
+    : <SecretWorkspace projectId={project.id} projectName={project.name} />;
 }
 
 function SectionPage({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }): ReactNode {
   return <div className="page-stack"><PageHeader eyebrow={eyebrow} title={title} copy={copy} /><section className="quiet-panel"><BrandMark /><h2>Foundation ready</h2><p>This workspace is prepared for the next focused workflow.</p></section></div>;
 }
 
-function PageHeader({ eyebrow, title, copy, action }: { eyebrow: string; title: string; copy: string; action?: string }): ReactNode {
-  return <header className="page-header"><div><span>{eyebrow}</span><h1>{title}</h1><p>{copy}</p></div>{action ? <button className="primary-button" type="button"><span>＋</span>{action}</button> : null}</header>;
+function PageHeader({ eyebrow, title, copy, action, onAction }: { eyebrow: string; title: string; copy: string; action?: string; onAction?: () => void }): ReactNode {
+  return <header className="page-header"><div><span>{eyebrow}</span><h1>{title}</h1><p>{copy}</p></div>{action ? <button className="primary-button" type="button" onClick={onAction}><span>＋</span>{action}</button> : null}</header>;
 }
 
 function Metric({ value, label, accent = false }: { value: string; label: string; accent?: boolean }): ReactNode {

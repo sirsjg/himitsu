@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import {
   AppRoutes,
   type CommandItem,
+  createProject,
   filterCommandItems,
   validateAuthForm,
 } from "../src/App.js";
@@ -61,6 +62,24 @@ test("authenticated project route renders the shell, organization switcher, and 
   assert.match(html, /Atlas API/);
   assert.match(html, /Lantern Web/);
   assert.match(html, /Relay Worker/);
+});
+
+test("project creation posts the API contract and returns a workspace-ready project", async () => {
+  let request: { input: string; method?: string; body?: unknown } | undefined;
+  const project = await createProject({ name: "Payments API", slug: "payments-api" }, async (input, init) => {
+    request = { input: String(input), ...(init?.method === undefined ? {} : { method: init.method }), body: JSON.parse(String(init?.body)) };
+    return new Response(JSON.stringify({ data: { id: "project-id", name: "Payments API", slug: "payments-api" } }), {
+      status: 201,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  assert.deepEqual(request, { input: "/api/v1/projects", method: "POST", body: { name: "Payments API", slug: "payments-api" } });
+  assert.deepEqual(project, { id: "project-id", name: "Payments API", slug: "payments-api", secrets: [] });
+
+  await assert.rejects(
+    () => createProject({ name: "Duplicate", slug: "payments-api" }, async () => new Response(JSON.stringify({ error: { message: "Project slug already exists" } }), { status: 409 })),
+    /Project slug already exists/,
+  );
 });
 
 test("login, signup, and password recovery routes render their complete forms", () => {

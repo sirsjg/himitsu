@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "npm run typecheck && vite build",
+    "dev": "vite",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/tests/unit.test.js",
+    "test:e2e": "playwright test",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -14,6 +16,7 @@
     "react-router-dom": "^7.7.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/react": "^19.1.9",
     "@types/react-dom": "^19.1.7",
     "vite": "^7.0.6"
