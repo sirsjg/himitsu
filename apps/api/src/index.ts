@@ -337,6 +337,13 @@ const createdApiKeySchema = {
   properties: { apiKey: apiKeySchema, token: { type: "string", pattern: "^himi_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$" } },
 } as const;
 const stringMapSchema = { type: "object", additionalProperties: { type: "string" } } as const;
+const runtimeConfigSchema = {
+  type: "object", additionalProperties: false, required: ["configVersion", "secrets"],
+  properties: {
+    configVersion: { type: "integer", minimum: 0 },
+    secrets: stringMapSchema,
+  },
+} as const;
 const consistencyFindingSchema = {
   type: "object", additionalProperties: false,
   required: ["id", "type", "severity", "key", "keys", "environmentIds", "missingEnvironmentIds", "disposition", "dispositionNote", "dispositionUpdatedAt"],
@@ -430,6 +437,7 @@ export const apiRoutePermissions = Object.freeze({
   createSecret: "secret.write",
   bulkSetSecrets: "secret.write",
   bulkGetSecrets: "secret.read",
+  fetchRuntimeSecrets: "secret.read",
   previewSecretPromotion: "secret.write",
   promoteSecrets: "secret.write",
   getSecret: "secret.read",
@@ -1117,6 +1125,35 @@ function registerSecretRoutes(
     params(request).environmentId ?? "",
     (request.body as { secrets: Parameters<SecretService["bulkSet"]>[4] }).secrets,
   ) })));
+  app.get("/api/v1/projects/:projectId/environments/:environmentId/secrets/runtime", {
+    schema: {
+      operationId: "fetchRuntimeSecrets", tags: ["secrets"], params: scopeParams,
+      response: {
+        200: responseEnvelope(runtimeConfigSchema),
+        304: { type: "null" },
+        "4xx": errorResponse,
+        "5xx": errorResponse,
+      },
+    },
+  }, async (request, reply) => withTenant(request, async (transaction, context) => {
+    const result = await dependencies.secrets.runtimeConfig(
+      transaction,
+      context.userId,
+      params(request).projectId ?? "",
+      params(request).environmentId ?? "",
+      parseRuntimeEtags(headerValue(request.headers["if-none-match"])),
+      context.actor.type === "api_key"
+        ? { type: "api_key", id: context.actor.apiKeyId }
+        : { type: "user", id: context.actor.userId },
+    );
+    void reply.header("etag", runtimeEtag(result.configVersion));
+    void reply.header("x-himitsu-config-version", String(result.configVersion));
+    if (result.notModified) return reply.status(304).send();
+    return reply.status(200).send({ data: {
+      configVersion: result.configVersion,
+      secrets: result.secrets ?? {},
+    } });
+  }));
   app.post("/api/v1/projects/:projectId/environments/:environmentId/secrets/bulk-get", {
     schema: {
       operationId: "bulkGetSecrets", tags: ["secrets"], params: scopeParams,
@@ -1656,6 +1693,22 @@ async function enforceApiKeyScope(
 
 function pagination(query: PageQuery): { limit: number; offset: number } {
   return { limit: query.limit ?? 50, offset: query.offset ?? 0 };
+}
+
+function runtimeEtag(configVersion: number): string {
+  return `"himi-config-${configVersion}"`;
+}
+
+function parseRuntimeEtags(header: string | undefined): readonly number[] | "*" {
+  if (header === undefined) return [];
+  const tags = header.split(",").map((value) => value.trim());
+  if (tags.includes("*")) return "*";
+  return tags.flatMap((tag) => {
+    const match = /^(?:W\/)?"himi-config-(\d+)"$/.exec(tag);
+    if (match?.[1] === undefined) return [];
+    const version = Number(match[1]);
+    return Number.isSafeInteger(version) ? [version] : [];
+  });
 }
 
 function paginated<T>(all: readonly T[], query: PageQuery): { data: readonly T[]; meta: Record<string, number> } {

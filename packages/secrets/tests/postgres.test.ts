@@ -114,6 +114,20 @@ test("creates encrypted secrets and decrypts only on audited reads", async () =>
     assert.equal(persisted.rows[0]?.nonce_length, 12);
     assert.equal(persisted.rows[0]?.tag_length, 16);
     assert.equal(persisted.rows[0]?.encryption_key_version, 1);
+    const runtime = await secrets.runtimeConfig(
+      transaction, readerA, projectA, developmentEnvironmentId,
+    );
+    assert.equal(runtime.configVersion, 1);
+    assert.equal(runtime.notModified, false);
+    assert.deepEqual(runtime.secrets, { DATABASE_URL: value });
+    const unchanged = await secrets.runtimeConfig(
+      transaction, readerA, projectA, developmentEnvironmentId, [runtime.configVersion],
+    );
+    assert.deepEqual(unchanged, { configVersion: 1, notModified: true });
+    const readAudits = await transaction.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM audit_events WHERE action = 'secret.read'",
+    );
+    assert.equal(readAudits.rows[0]?.count, 2, "a matching config version must not decrypt or add a read audit");
   });
 });
 
@@ -126,6 +140,11 @@ test("updates values immutably and enforces key, value, and uniqueness validatio
     });
     assert.equal(updated.currentVersion, 2);
     assert.equal(updated.notes, null);
+    const runtime = await secrets.runtimeConfig(
+      transaction, memberA, projectA, developmentEnvironmentId, [1],
+    );
+    assert.equal(runtime.configVersion, 2);
+    assert.equal(runtime.secrets?.DATABASE_URL, "postgres://rotated");
     const versions = await transaction.query<{ version: number; ciphertext: Buffer }>(
       "SELECT version, value_ciphertext AS ciphertext FROM secret_versions WHERE secret_id = $1 ORDER BY version",
       [databaseSecretId],

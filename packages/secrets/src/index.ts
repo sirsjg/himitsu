@@ -55,6 +55,12 @@ export interface SecretWithValue extends SecretMetadata {
   readonly value: string;
 }
 
+export interface RuntimeSecretConfig {
+  readonly configVersion: number;
+  readonly notModified: boolean;
+  readonly secrets?: Readonly<Record<string, string>>;
+}
+
 export interface SecretVersionMetadata {
   readonly version: number;
   readonly authorUserId: string | null;
@@ -286,6 +292,75 @@ export class SecretService {
       return secret;
     } finally {
       plaintext.fill(0);
+      encryption.clearKeyCache();
+    }
+  }
+
+  async runtimeConfig(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    projectId: string,
+    environmentId: string,
+    knownVersions: readonly number[] | "*" = [],
+    auditActor: AuditEventInput["actor"] = { type: "user", id: actorUserId },
+  ): Promise<RuntimeSecretConfig> {
+    const environment = await transaction.query<{ protected: boolean; config_version: string }>(
+      `SELECT e.protected, e.config_version::text AS config_version
+       FROM environments e JOIN projects p ON p.id = e.project_id AND p.org_id = e.org_id
+       WHERE e.id = $1 AND e.project_id = $2
+         AND e.deleted_at IS NULL AND p.deleted_at IS NULL`,
+      [environmentId, projectId],
+    );
+    const scope = environment.rows[0];
+    if (scope === undefined) throw new SecretError("NOT_FOUND", "Environment not found");
+    requirePermission(
+      await this.#resolver.resolve(transaction, actorUserId, projectId, scope.protected),
+      "secret.read",
+    );
+    const configVersion = Number(scope.config_version);
+    if (!Number.isSafeInteger(configVersion) || configVersion < 0) {
+      throw new Error("Environment config version is outside the supported range");
+    }
+    if (knownVersions === "*" || knownVersions.includes(configVersion)) {
+      return { configVersion, notModified: true };
+    }
+
+    const rows = await transaction.query<SecretValueRow>(
+      `SELECT ${secretColumns}, sv.value_ciphertext, sv.nonce, sv.auth_tag, sv.encryption_key_version
+       FROM secrets s
+       JOIN secret_versions sv
+         ON sv.org_id = s.org_id AND sv.secret_id = s.id AND sv.version = s.current_version
+       WHERE s.project_id = $1 AND s.environment_id = $2 AND s.deleted_at IS NULL
+       ORDER BY s.key, s.id`,
+      [projectId, environmentId],
+    );
+    const encryption = this.#encryption(transaction);
+    const plaintextBuffers: Buffer[] = [];
+    try {
+      const entries: Array<readonly [string, string]> = [];
+      for (const row of rows.rows) {
+        const plaintext = await encryption.decrypt(this.#encrypted(row), {
+          orgId: row.org_id,
+          projectId: row.project_id,
+          environmentId: row.environment_id,
+          secretId: row.id,
+          recordVersion: row.current_version,
+        });
+        plaintextBuffers.push(plaintext);
+        entries.push([row.key, plaintext.toString("utf8")]);
+      }
+      await this.#audit.recordInTransaction(transaction, {
+        orgId: transaction.orgId,
+        actor: auditActor,
+        action: "secret.read",
+        resource: { type: "environment", id: environmentId },
+        projectId,
+        environmentId,
+        details: { count: entries.length, configVersion },
+      });
+      return { configVersion, notModified: false, secrets: Object.fromEntries(entries) };
+    } finally {
+      for (const plaintext of plaintextBuffers) plaintext.fill(0);
       encryption.clearKeyCache();
     }
   }

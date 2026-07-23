@@ -10,13 +10,13 @@ database_dir="$repo_dir/packages/database"
 
 cleanup() {
   psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DROP OWNED BY himitsu_app; DROP ROLE IF EXISTS himitsu_app"
-  for migration in 0009_secrets.down.sql 0008_environments.down.sql 0007_projects.down.sql 0006_rbac.down.sql 0005_tenancy.down.sql 0004_auth.down.sql 0003_audit_append_only.down.sql 0002_org_encryption_keys.down.sql 0001_core.down.sql; do
+  for migration in 0013_runtime_config_version.down.sql 0009_secrets.down.sql 0008_environments.down.sql 0007_projects.down.sql 0006_rbac.down.sql 0005_tenancy.down.sql 0004_auth.down.sql 0003_audit_append_only.down.sql 0002_org_encryption_keys.down.sql 0001_core.down.sql; do
     psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$database_dir/migrations/$migration"
   done
 }
 trap cleanup EXIT
 
-for migration in 0001_core.sql 0002_org_encryption_keys.sql 0003_audit_append_only.sql 0004_auth.sql 0005_tenancy.sql 0006_rbac.sql 0007_projects.sql 0008_environments.sql 0009_secrets.sql; do
+for migration in 0001_core.sql 0002_org_encryption_keys.sql 0003_audit_append_only.sql 0004_auth.sql 0005_tenancy.sql 0006_rbac.sql 0007_projects.sql 0008_environments.sql 0009_secrets.sql 0013_runtime_config_version.sql; do
   psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$database_dir/migrations/$migration"
 done
 

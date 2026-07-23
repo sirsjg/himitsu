@@ -405,6 +405,31 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   assert.equal(bulkGet.statusCode, 200, bulkGet.body);
   assert.deepEqual(bulkGet.json().data, { DATABASE_URL: "postgres://api-second", FEATURE_FLAG: "on" });
 
+  const runtime = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/runtime`,
+    headers: headers(orgA, memberA),
+  });
+  assert.equal(runtime.statusCode, 200, runtime.body);
+  assert.ok(Number.isInteger(runtime.json().data.configVersion));
+  assert.deepEqual(runtime.json().data.secrets, {
+    CACHE_URL: "redis://api",
+    DATABASE_URL: "postgres://api-second",
+    FEATURE_FLAG: "on",
+  });
+  const runtimeEtag = runtime.headers.etag;
+  assert.match(runtimeEtag ?? "", /^"himi-config-\d+"$/);
+  assert.equal(runtime.headers["x-himitsu-config-version"], String(runtime.json().data.configVersion));
+  assert.equal(runtime.headers["cache-control"], "no-store");
+  const unchangedRuntime = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/runtime`,
+    headers: { ...headers(orgA, memberA), "if-none-match": `W/${runtimeEtag}` },
+  });
+  assert.equal(unchangedRuntime.statusCode, 304, unchangedRuntime.body);
+  assert.equal(unchangedRuntime.body, "");
+  assert.equal(unchangedRuntime.headers.etag, runtimeEtag);
+
   const rollback = await app.inject({
     method: "POST",
     url: `/api/v1/secrets/${secretId}/versions/1/rollback`,
@@ -413,6 +438,14 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   });
   assert.equal(rollback.statusCode, 200, rollback.body);
   assert.equal(rollback.json().data.currentVersion, 3);
+  const changedRuntime = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/runtime`,
+    headers: { ...headers(orgA, memberA), "if-none-match": runtimeEtag },
+  });
+  assert.equal(changedRuntime.statusCode, 200, changedRuntime.body);
+  assert.ok(changedRuntime.json().data.configVersion > runtime.json().data.configVersion);
+  assert.equal(changedRuntime.json().data.secrets.DATABASE_URL, "postgres://api-first");
   const staleRollback = await app.inject({
     method: "POST",
     url: `/api/v1/secrets/${secretId}/versions/1/rollback`,
@@ -940,6 +973,25 @@ test("manages scoped API keys while revealing token material only at creation", 
     headers: { authorization: `Bearer ${readOnlyToken}` },
   });
   assert.equal(readOnlyGet.statusCode, 200, readOnlyGet.body);
+  const readOnlyRuntime = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets/runtime`,
+    headers: { authorization: `Bearer ${readOnlyToken}` },
+  });
+  assert.equal(readOnlyRuntime.statusCode, 200, readOnlyRuntime.body);
+  assert.ok(readOnlyRuntime.headers.etag);
+  const runtimeAudit = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{
+    actor_type: string;
+    actor_api_key_id: string;
+    metadata: { details?: { count?: number; configVersion?: number } };
+  }>(
+    `SELECT actor_type, actor_api_key_id, metadata FROM audit_events
+     WHERE action = 'secret.read' AND actor_api_key_id = $1 ORDER BY id DESC LIMIT 1`,
+    [readOnlyCreated.json().data.apiKey.id],
+  ));
+  assert.equal(runtimeAudit.rows[0]?.actor_type, "api_key");
+  assert.ok((runtimeAudit.rows[0]?.metadata.details?.count ?? 0) > 0);
+  assert.ok(Number.isInteger(runtimeAudit.rows[0]?.metadata.details?.configVersion));
   const readOnlyWrite = await app.inject({
     method: "POST",
     url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
