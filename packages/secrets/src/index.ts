@@ -61,6 +61,17 @@ export interface RuntimeSecretConfig {
   readonly secrets?: Readonly<Record<string, string>>;
 }
 
+export type SecretExportFormat = "dotenv" | "json" | "shell";
+
+export interface SecretExportResult {
+  readonly format: SecretExportFormat;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly content: string;
+  readonly secretCount: number;
+  readonly nested: boolean;
+}
+
 export interface SecretVersionMetadata {
   readonly version: number;
   readonly authorUserId: string | null;
@@ -174,6 +185,62 @@ export function validateSecretValue(value: string): Buffer {
     throw new SecretError("VALUE_TOO_LARGE", "Secret values cannot exceed 64 KiB when UTF-8 encoded");
   }
   return encoded;
+}
+
+function exportableKey(key: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new SecretError("INVALID_INPUT", `Secret key ${key} cannot be represented in dotenv or shell format`);
+  }
+  return key;
+}
+
+export function serializeSecretExport(
+  secrets: Readonly<Record<string, string>>,
+  format: SecretExportFormat,
+  options: { nested?: boolean; delimiter?: string } = {},
+): string {
+  const entries = Object.entries(secrets).sort(([left], [right]) => left.localeCompare(right));
+  if (format === "dotenv") {
+    return entries.map(([key, value]) => `${exportableKey(key)}=${JSON.stringify(value)}`).join("\n")
+      + (entries.length === 0 ? "" : "\n");
+  }
+  if (format === "shell") {
+    return entries.map(([key, value]) => `export ${exportableKey(key)}='${value.replaceAll("'", "'\\''")}'`).join("\n")
+      + (entries.length === 0 ? "" : "\n");
+  }
+  if (!options.nested) return JSON.stringify(Object.fromEntries(entries), null, 2) + "\n";
+  const delimiter = options.delimiter ?? "__";
+  if (delimiter.length < 1 || delimiter.length > 10) {
+    throw new SecretError("INVALID_INPUT", "Nested JSON delimiters must be between 1 and 10 characters");
+  }
+  const root: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of entries) {
+    const path = key.split(delimiter);
+    if (path.some((segment) => segment === "")) {
+      throw new SecretError("INVALID_INPUT", `Secret key ${key} has an empty nested JSON path segment`);
+    }
+    let cursor = root;
+    for (const [index, segment] of path.entries()) {
+      if (index === path.length - 1) {
+        if (Object.hasOwn(cursor, segment)) {
+          throw new SecretError("INVALID_INPUT", `Secret key ${key} conflicts with another nested JSON path`);
+        }
+        cursor[segment] = value;
+        continue;
+      }
+      const existing = cursor[segment];
+      if (existing === undefined) {
+        const child: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+        cursor[segment] = child;
+        cursor = child;
+      } else if (typeof existing === "object" && existing !== null && !Array.isArray(existing)) {
+        cursor = existing as Record<string, unknown>;
+      } else {
+        throw new SecretError("INVALID_INPUT", `Secret key ${key} conflicts with another nested JSON path`);
+      }
+    }
+  }
+  return JSON.stringify(root, null, 2) + "\n";
 }
 
 function validateNotes(notes: string | null | undefined): string | null {
@@ -359,6 +426,84 @@ export class SecretService {
         details: { count: entries.length, configVersion },
       });
       return { configVersion, notModified: false, secrets: Object.fromEntries(entries) };
+    } finally {
+      for (const plaintext of plaintextBuffers) plaintext.fill(0);
+      encryption.clearKeyCache();
+    }
+  }
+
+  async exportConfig(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    projectId: string,
+    environmentId: string,
+    format: SecretExportFormat,
+    options: { nested?: boolean; delimiter?: string } = {},
+    auditActor: AuditEventInput["actor"] = { type: "user", id: actorUserId },
+  ): Promise<SecretExportResult> {
+    const environment = await transaction.query<{
+      protected: boolean;
+      environment_slug: string;
+      project_slug: string;
+    }>(
+      `SELECT e.protected, e.slug AS environment_slug, p.slug AS project_slug
+       FROM environments e JOIN projects p ON p.id = e.project_id AND p.org_id = e.org_id
+       WHERE e.id = $1 AND e.project_id = $2
+         AND e.deleted_at IS NULL AND p.deleted_at IS NULL`,
+      [environmentId, projectId],
+    );
+    const scope = environment.rows[0];
+    if (scope === undefined) throw new SecretError("NOT_FOUND", "Environment not found");
+    requirePermission(
+      await this.#resolver.resolve(transaction, actorUserId, projectId, scope.protected),
+      "secret.read",
+    );
+    if (!(format === "dotenv" || format === "json" || format === "shell")) {
+      throw new SecretError("INVALID_INPUT", "Secret export format is invalid");
+    }
+    const rows = await transaction.query<SecretValueRow>(
+      `SELECT ${secretColumns}, sv.value_ciphertext, sv.nonce, sv.auth_tag, sv.encryption_key_version
+       FROM secrets s JOIN secret_versions sv
+         ON sv.org_id = s.org_id AND sv.secret_id = s.id AND sv.version = s.current_version
+       WHERE s.project_id = $1 AND s.environment_id = $2 AND s.deleted_at IS NULL
+       ORDER BY s.key, s.id`,
+      [projectId, environmentId],
+    );
+    const encryption = this.#encryption(transaction);
+    const plaintextBuffers: Buffer[] = [];
+    try {
+      const entries: Array<readonly [string, string]> = [];
+      for (const row of rows.rows) {
+        const plaintext = await encryption.decrypt(this.#encrypted(row), {
+          orgId: row.org_id,
+          projectId: row.project_id,
+          environmentId: row.environment_id,
+          secretId: row.id,
+          recordVersion: row.current_version,
+        });
+        plaintextBuffers.push(plaintext);
+        entries.push([row.key, plaintext.toString("utf8")]);
+      }
+      const nested = format === "json" && (options.nested ?? false);
+      const content = serializeSecretExport(Object.fromEntries(entries), format, options);
+      await this.#audit.recordInTransaction(transaction, {
+        orgId: transaction.orgId,
+        actor: auditActor,
+        action: "secret.exported",
+        resource: { type: "environment", id: environmentId },
+        projectId,
+        environmentId,
+        details: { format, nested, count: entries.length },
+      });
+      const extension = format === "dotenv" ? "env" : format === "shell" ? "sh" : "json";
+      return {
+        format,
+        filename: `${scope.project_slug}-${scope.environment_slug}.${extension}`,
+        mimeType: format === "json" ? "application/json" : "text/plain; charset=utf-8",
+        content,
+        secretCount: entries.length,
+        nested,
+      };
     } finally {
       for (const plaintext of plaintextBuffers) plaintext.fill(0);
       encryption.clearKeyCache();

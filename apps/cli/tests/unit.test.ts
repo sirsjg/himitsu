@@ -99,6 +99,7 @@ test("API client supports push, get, create, update, and remove operations", asy
       listCount += 1;
       return jsonResponse(listCount === 2 ? [] : [{ id: "secret-a", key: "EXISTING", currentVersion: 4 }], 200, { total: listCount === 2 ? 0 : 1 });
     }
+    if (url.includes("/exports?")) return jsonResponse({ format: "shell", filename: "project-environment.sh", mimeType: "text/plain", content: "export A='b'\n", secretCount: 1, nested: false });
     if (url.endsWith("/secret-a") && (init?.method ?? "GET") === "GET") return jsonResponse({ id: "secret-a", key: "EXISTING", value: "secret-value", currentVersion: 4 });
     return jsonResponse({ ok: true });
   };
@@ -108,12 +109,14 @@ test("API client supports push, get, create, update, and remove operations", asy
   await client.setSecret("project", "environment", "EXISTING", "updated");
   await client.removeSecret("project", "environment", "EXISTING");
   await client.push("project", "environment", "json", '{"A":"b"}', "merge", ".");
+  assert.equal((await client.exportConfig("project", "environment", "shell")).content, "export A='b'\n");
   const patch = calls.find(({ init }) => init?.method === "PATCH");
   assert.equal(new Headers(patch?.init?.headers).get("if-match"), '"4"');
   assert.equal(new Headers(patch?.init?.headers).get("x-csrf-token"), "csrf");
   assert.ok(calls.some(({ url, init }) => url.endsWith("/secrets") && init?.method === "POST"));
   assert.ok(calls.some(({ url, init }) => url.endsWith("/secret-a") && init?.method === "DELETE"));
   assert.ok(calls.some(({ url }) => url.endsWith("/imports/json")));
+  assert.ok(calls.some(({ url }) => url.endsWith("/exports?format=shell")));
 });
 
 test("login reads a password from stdin and persists the selected organization session", async () => {
@@ -140,15 +143,18 @@ test("pull writes a private file and check returns the consistency exit code", a
   const root = await mkdtemp(join(tmpdir(), "himitsu-cli-pull-"));
   try {
     await writeRepoConfig(root, { apiUrl: "https://api.test", projectId: "project", environmentId: "environment" });
+    const requested: string[] = [];
     const request = async (url: string): Promise<Response> => {
+      requested.push(url);
       if (url.includes("/consistency")) return jsonResponse({ summary: { healthy: false, exitCode: 1, activeFindings: 2, errors: 1, warnings: 1 } });
-      if (url.includes("/secrets?")) return jsonResponse([{ id: "secret", key: "API_KEY", currentVersion: 1 }], 200, { total: 1 });
-      return jsonResponse({ API_KEY: "value" });
+      if (url.includes("/exports?")) return jsonResponse({ format: "json", filename: "project-environment.json", mimeType: "application/json", content: '{\n  "API_KEY": "value"\n}\n', secretCount: 1, nested: true });
+      throw new Error(`Unexpected request: ${url}`);
     };
     const environment = { HIMITSU_TOKEN: "token" };
-    assert.equal(await main(["pull", "--format", "json", "--out", "secrets.json"], { cwd: root, environment, stdout: new Capture(), stderr: new Capture(), request }), 0);
+    assert.equal(await main(["pull", "--format", "json", "--nested", "--out", "secrets.json"], { cwd: root, environment, stdout: new Capture(), stderr: new Capture(), request }), 0);
     assert.equal(await readFile(join(root, "secrets.json"), "utf8"), '{\n  "API_KEY": "value"\n}\n');
     assert.equal((await stat(join(root, "secrets.json"))).mode & 0o777, 0o600);
+    assert.match(requested[0] ?? "", /\/exports\?format=json&nested=true&delimiter=__/);
     const stdout = new Capture();
     assert.equal(await main(["check"], { cwd: root, environment, stdout, stderr: new Capture(), request }), 1);
     assert.match(stdout.value, /^drift: 1 errors, 1 warnings/);

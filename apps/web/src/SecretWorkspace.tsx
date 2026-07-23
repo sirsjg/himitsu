@@ -124,6 +124,15 @@ export interface SecretImportResultView {
   readonly summary: { readonly requested: number; readonly created: number; readonly updated: number; readonly skipped: number };
 }
 
+export interface SecretExportView {
+  readonly format: "dotenv" | "json" | "shell";
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly content: string;
+  readonly secretCount: number;
+  readonly nested: boolean;
+}
+
 interface ApiSecretMetadata {
   readonly id: string;
   readonly environmentId: string;
@@ -165,6 +174,7 @@ export interface SecretClient {
   importDotenv(projectId: string, environmentId: string, content: string, strategy: "skip" | "overwrite" | "merge", selectedKeys?: readonly string[]): Promise<SecretImportResultView>;
   previewJson(projectId: string, environmentId: string, content: string, delimiter: string): Promise<JsonImportPreviewView>;
   importJson(projectId: string, environmentId: string, content: string, delimiter: string, strategy: "skip" | "overwrite" | "merge", selectedKeys?: readonly string[]): Promise<SecretImportResultView>;
+  exportSecrets(projectId: string, environmentId: string, format: "dotenv" | "json" | "shell", nested?: boolean, delimiter?: string): Promise<SecretExportView>;
   versions(secretId: string): Promise<readonly SecretVersionView[]>;
   compareVersions(secretId: string, fromVersion: number, toVersion: number, reveal?: boolean): Promise<SecretVersionComparisonView>;
   rollbackVersion(secretId: string, targetVersion: number, expectedVersion: number): Promise<ApiSecretMetadata>;
@@ -241,6 +251,7 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
     importDotenv: (projectId, environmentId, content, strategy, selectedKeys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/dotenv`, { method: "POST", body: JSON.stringify({ content, strategy, ...(selectedKeys === undefined ? {} : { selectedKeys }) }) }),
     previewJson: (projectId, environmentId, content, delimiter) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/json/preview`, { method: "POST", body: JSON.stringify({ content, delimiter }) }),
     importJson: (projectId, environmentId, content, delimiter, strategy, selectedKeys) => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/json`, { method: "POST", body: JSON.stringify({ content, delimiter, strategy, ...(selectedKeys === undefined ? {} : { selectedKeys }) }) }),
+    exportSecrets: (projectId, environmentId, format, nested = false, delimiter = "__") => json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/exports?format=${format}${nested ? `&nested=true&delimiter=${encodeURIComponent(delimiter)}` : ""}`),
     versions: (secretId) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions?limit=100`),
     compareVersions: (secretId, fromVersion, toVersion, reveal = false) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/compare?from=${fromVersion}&to=${toVersion}${reveal ? "&reveal=true" : ""}`),
     rollbackVersion: (secretId, targetVersion, expectedVersion) => json(`/api/v1/secrets/${encodeURIComponent(secretId)}/versions/${targetVersion}/rollback`, { method: "POST", body: JSON.stringify({ expectedVersion, changeNote: `Rollback to version ${targetVersion}` }) }),
@@ -330,6 +341,7 @@ export function SecretWorkspace({
     : []);
   const [editor, setEditor] = useState<{ mode: "add" | "edit"; secret?: SecretView; initialKey?: string } | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [historySecret, setHistorySecret] = useState<SecretView | null>(null);
   const [revealed, setRevealed] = useState<Readonly<Record<string, string>>>({});
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
@@ -537,7 +549,7 @@ export function SecretWorkspace({
       </header>
       <section className="secret-hero">
         <div><span className="kicker">Project vault</span><h1>{projectName}</h1><p>Reveal only what you need. Values automatically return to a masked state after 15 seconds.</p></div>
-        <div className="secret-actions"><button className="secondary-button" type="button" onClick={() => setBulkOpen(true)}>Bulk paste</button><button className="primary-button" type="button" onClick={() => setEditor({ mode: "add" })}>＋ Add secret</button></div>
+        <div className="secret-actions"><button className="secondary-button" type="button" onClick={() => setExportOpen(true)}>Export</button><button className="secondary-button" type="button" onClick={() => setBulkOpen(true)}>Bulk paste</button><button className="primary-button" type="button" onClick={() => setEditor({ mode: "add" })}>＋ Add secret</button></div>
       </section>
       <ConsistencyHealthPanel
         report={health}
@@ -562,6 +574,7 @@ export function SecretWorkspace({
         </header>
         {notice ? <p className={`workspace-notice ${notice.kind}`} role="status">{notice.message}<button type="button" aria-label="Dismiss notification" onClick={() => setNotice(null)}>×</button></p> : null}
         {editor ? <SecretEditor mode={editor.mode} availableTags={availableTags} {...(editor.secret === undefined ? {} : { secret: editor.secret })} {...(editor.initialKey === undefined ? {} : { initialKey: editor.initialKey })} onCancel={() => setEditor(null)} onSave={save} /> : null}
+        {exportOpen && environment ? <SecretExportDialog projectId={projectId} environmentId={environment.id} client={client} onCancel={() => setExportOpen(false)} onExported={(result) => { setExportOpen(false); setNotice({ kind: "success", message: `Exported ${result.secretCount} secrets as ${result.format}.` }); }} /> : null}
         <div className="secret-table" role="table" aria-label={`${environment?.name ?? "Environment"} secrets`}>
           <div className="secret-table-head" role="row"><span role="columnheader">Key</span><span role="columnheader">Encrypted value</span><span role="columnheader">Tags</span><span role="columnheader">Version</span><span role="columnheader" className="sr-only">Actions</span></div>
           {visibleSecrets.map((secret) => (
@@ -697,6 +710,39 @@ function SecretEditor({ mode, secret, initialKey, availableTags, onCancel, onSav
     void onSave({ key, value: String(data.get("value") ?? ""), notes: String(data.get("notes") ?? ""), changeNote: String(data.get("changeNote") ?? ""), allowNonConformingKey, tagIds: [...tagIds] });
   };
   return <form className="editor-sheet inline-secret-editor" aria-label={`${mode === "add" ? "Add" : "Edit"} secret`} onSubmit={submit}><header><div><span className="kicker">{mode === "add" ? "New encrypted value" : `Version ${secret?.currentVersion ?? ""}`}</span><h2>{mode === "add" ? "Add a secret" : `Update ${secret?.key ?? "secret"}`}</h2></div><button type="button" aria-label="Close editor" onClick={onCancel}>×</button></header><label>Key<input name="key" value={key} disabled={mode === "edit"} onChange={(event) => setKey(event.target.value)} required maxLength={255} autoFocus={mode === "add"} /><small className={conventional || key === "" ? "key-hint" : "key-hint warning"}>{conventional || key === "" ? "Use UPPERCASE_SNAKE_CASE, for example DATABASE_URL." : "This key does not follow UPPERCASE_SNAKE_CASE."}</small></label>{!conventional && key !== "" && mode === "add" ? <label className="check-row"><input type="checkbox" checked={allowNonConformingKey} onChange={(event) => setAllowNonConformingKey(event.target.checked)} /> Keep this non-standard key</label> : null}<label>{mode === "add" ? "Value" : "Replacement value"}<textarea name="value" required rows={5} spellCheck={false} autoComplete="off" placeholder="Secret value (never shown after save)" /></label><label>Note <span>optional</span><input name="notes" defaultValue={secret?.notes ?? ""} maxLength={4000} placeholder="What uses this secret?" /></label>{mode === "edit" ? <label>Change note <span>optional</span><input name="changeNote" maxLength={1000} placeholder="Why is this value changing?" /></label> : null}{availableTags.length > 0 ? <fieldset className="tag-picker"><legend>Tags <span>optional</span></legend>{availableTags.map((tag) => <label key={tag.id}><input type="checkbox" checked={tagIds.has(tag.id)} onChange={() => setTagIds((current) => { const next = new Set(current); if (next.has(tag.id)) next.delete(tag.id); else next.add(tag.id); return next; })} /><span style={{ borderColor: tag.color }}>#{tag.name}</span></label>)}</fieldset> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit" disabled={key.trim() === "" || (!conventional && !allowNonConformingKey && mode === "add")}>{mode === "add" ? "Encrypt & save" : "Create new version"}</button></footer></form>;
+}
+
+function SecretExportDialog({ projectId, environmentId, client, onCancel, onExported }: {
+  projectId: string;
+  environmentId: string;
+  client: SecretClient;
+  onCancel: () => void;
+  onExported: (result: SecretExportView) => void;
+}): ReactNode {
+  const [format, setFormat] = useState<"dotenv" | "json" | "shell">("dotenv");
+  const [nested, setNested] = useState(false);
+  const [delimiter, setDelimiter] = useState("__");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await client.exportSecrets(projectId, environmentId, format, format === "json" && nested, delimiter);
+      const url = URL.createObjectURL(new Blob([result.content], { type: result.mimeType }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = result.filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      onExported(result);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Secrets could not be exported.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="sheet-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="editor-sheet export-sheet" role="dialog" aria-modal="true" aria-label="Export secrets"><header><div><span className="kicker">Audited plaintext export</span><h2>Export secrets</h2><p>Choose a tooling-friendly format. The download is generated only after read access is checked.</p></div><button type="button" aria-label="Close export" onClick={onCancel}>×</button></header><fieldset className="export-formats"><legend>Format</legend>{(["dotenv", "json", "shell"] as const).map((option) => <label key={option}><input type="radio" name="export-format" checked={format === option} onChange={() => { setFormat(option); if (option !== "json") setNested(false); }} /><span>{option === "dotenv" ? ".env" : option === "json" ? "JSON" : "Shell exports"}</span></label>)}</fieldset>{format === "json" ? <><label className="check-row"><input type="checkbox" checked={nested} onChange={(event) => setNested(event.target.checked)} /> Rebuild nested objects</label>{nested ? <label>Nested-key delimiter<input value={delimiter} minLength={1} maxLength={10} onChange={(event) => setDelimiter(event.target.value)} /></label> : null}</> : null}{error ? <p className="import-error" role="alert">{error}</p> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" disabled={busy || (nested && delimiter.length === 0)} onClick={() => void download()}>{busy ? "Preparing…" : "Download export"}</button></footer></section></div>;
 }
 
 function DotenvImport({ projectId, environmentId, client, onCancel, onImported }: {

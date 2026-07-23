@@ -344,6 +344,15 @@ const runtimeConfigSchema = {
     secrets: stringMapSchema,
   },
 } as const;
+const secretExportSchema = {
+  type: "object", additionalProperties: false,
+  required: ["format", "filename", "mimeType", "content", "secretCount", "nested"],
+  properties: {
+    format: { type: "string", enum: ["dotenv", "json", "shell"] },
+    filename: { type: "string" }, mimeType: { type: "string" }, content: { type: "string" },
+    secretCount: { type: "integer", minimum: 0 }, nested: { type: "boolean" },
+  },
+} as const;
 const consistencyFindingSchema = {
   type: "object", additionalProperties: false,
   required: ["id", "type", "severity", "key", "keys", "environmentIds", "missingEnvironmentIds", "disposition", "dispositionNote", "dispositionUpdatedAt"],
@@ -438,6 +447,7 @@ export const apiRoutePermissions = Object.freeze({
   bulkSetSecrets: "secret.write",
   bulkGetSecrets: "secret.read",
   fetchRuntimeSecrets: "secret.read",
+  exportSecrets: "secret.read",
   previewSecretPromotion: "secret.write",
   promoteSecrets: "secret.write",
   getSecret: "secret.read",
@@ -1173,6 +1183,33 @@ function registerSecretRoutes(
       values.push(await dependencies.secrets.get(transaction, context.userId, id));
     }
     return { data: Object.fromEntries(values.map(({ key, value }) => [key, value])), meta: { count: values.length } };
+  }));
+  app.get("/api/v1/projects/:projectId/environments/:environmentId/exports", {
+    schema: {
+      operationId: "exportSecrets", tags: ["secrets"], params: scopeParams,
+      querystring: {
+        type: "object", additionalProperties: false, required: ["format"],
+        properties: {
+          format: { type: "string", enum: ["dotenv", "json", "shell"] },
+          nested: { type: "boolean", default: false },
+          delimiter: { type: "string", minLength: 1, maxLength: 10, default: "__" },
+        },
+      },
+      response: apiResponses(secretExportSchema),
+    },
+  }, async (request) => withTenant(request, async (transaction, context) => {
+    const query = request.query as { format: "dotenv" | "json" | "shell"; nested?: boolean; delimiter?: string };
+    return { data: await dependencies.secrets.exportConfig(
+      transaction,
+      context.userId,
+      params(request).projectId ?? "",
+      params(request).environmentId ?? "",
+      query.format,
+      { nested: query.nested ?? false, delimiter: query.delimiter ?? "__" },
+      context.actor.type === "api_key"
+        ? { type: "api_key", id: context.actor.apiKeyId }
+        : { type: "user", id: context.actor.userId },
+    ) };
   }));
   const dotenvBody = {
     type: "object", additionalProperties: false, required: ["content"],

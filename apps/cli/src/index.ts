@@ -33,6 +33,15 @@ interface LoginResult {
   readonly organizations: readonly { readonly id: string; readonly name: string; readonly slug: string; readonly role: string; readonly active: boolean }[];
 }
 
+interface SecretExportResult {
+  readonly format: "dotenv" | "json" | "shell";
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly content: string;
+  readonly secretCount: number;
+  readonly nested: boolean;
+}
+
 type RequestFunction = (input: string, init?: RequestInit) => Promise<Response>;
 
 export class CliError extends Error {
@@ -95,6 +104,18 @@ export class HimitsuApiClient {
     return this.#json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/imports/${format}`, {
       method: "POST", body: JSON.stringify({ content, strategy, ...(format === "json" ? { delimiter } : {}) }),
     });
+  }
+
+  async exportConfig(
+    projectId: string,
+    environmentId: string,
+    format: "dotenv" | "json" | "shell",
+    options: { nested?: boolean; delimiter?: string } = {},
+  ): Promise<SecretExportResult> {
+    const query = new URLSearchParams({ format });
+    if (options.nested === true) query.set("nested", "true");
+    if (options.delimiter !== undefined) query.set("delimiter", options.delimiter);
+    return this.#json(`/api/v1/projects/${encodeURIComponent(projectId)}/environments/${encodeURIComponent(environmentId)}/exports?${query}`);
   }
 
   async check(projectId: string): Promise<{ healthy: boolean; exitCode: 0 | 1; activeFindings: number; errors: number; warnings: number }> {
@@ -267,8 +288,12 @@ export async function main(argv: readonly string[], options: MainOptions = {}): 
     const credential = environment.HIMITSU_TOKEN === undefined ? await readCredentials(environment) : null;
     const client = new HimitsuApiClient({ apiUrl: repo.config.apiUrl, ...(options.request === undefined ? {} : { request: options.request }), credential, token: environment.HIMITSU_TOKEN ?? null });
     if (command === "pull") {
-      const format = formatOption(parsed, optionalString(parsed, "format") ?? "dotenv");
-      const content = format === "json" ? serializeJson(await client.allSecrets(repo.config.projectId, repo.config.environmentId)) : serializeDotenv(await client.allSecrets(repo.config.projectId, repo.config.environmentId));
+      const format = exportFormatOption(optionalString(parsed, "format") ?? "dotenv");
+      const exported = await client.exportConfig(repo.config.projectId, repo.config.environmentId, format, {
+        nested: parsed.options.nested === true,
+        delimiter: optionalString(parsed, "delimiter") ?? "__",
+      });
+      const content = exported.content;
       const output = optionalString(parsed, "out") ?? "-";
       if (output === "-") stdout.write(content); else { await writeFile(resolve(cwd, output), content, { mode: 0o600 }); await chmod(resolve(cwd, output), 0o600); stdout.write(`Wrote ${output}\n`); }
       return 0;
@@ -348,6 +373,13 @@ function formatOption(_parsed: ParsedArguments, value: string): "dotenv" | "json
   return value;
 }
 
+function exportFormatOption(value: string): "dotenv" | "json" | "shell" {
+  if (value !== "dotenv" && value !== "json" && value !== "shell") {
+    throw new CliError("Export format must be dotenv, json, or shell.", 2);
+  }
+  return value;
+}
+
 function strategyOption(parsed: ParsedArguments): "skip" | "overwrite" | "merge" {
   const value = optionalString(parsed, "strategy") ?? "skip";
   if (value !== "skip" && value !== "overwrite" && value !== "merge") throw new CliError("Strategy must be skip, overwrite, or merge.", 2);
@@ -396,7 +428,7 @@ const helpText = `himitsu — encrypted configuration from the command line
 Usage:
   himitsu config set --project ID --environment ID [--api-url URL]
   himitsu login --email EMAIL [--org ID] [--password-stdin]
-  himitsu pull [--format dotenv|json] [--out FILE|-]
+  himitsu pull [--format dotenv|json|shell] [--nested] [--delimiter __] [--out FILE|-]
   himitsu push FILE [--format dotenv|json] [--strategy skip|overwrite|merge]
   himitsu run -- <command> [args...]
   himitsu check

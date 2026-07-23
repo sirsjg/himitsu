@@ -446,6 +446,63 @@ test("exposes secret create, update, bulk set/get, delete, and version metadata"
   assert.equal(changedRuntime.statusCode, 200, changedRuntime.body);
   assert.ok(changedRuntime.json().data.configVersion > runtime.json().data.configVersion);
   assert.equal(changedRuntime.json().data.secrets.DATABASE_URL, "postgres://api-first");
+
+  const nestedExportSecret = await app.inject({
+    method: "POST",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,
+    headers: headers(orgA, memberA),
+    payload: { key: "DATABASE__HOST", value: "db.internal", allowNonConformingKey: true },
+  });
+  assert.equal(nestedExportSecret.statusCode, 201, nestedExportSecret.body);
+
+  const dotenvExport = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/exports?format=dotenv`,
+    headers: headers(orgA, readerA),
+  });
+  assert.equal(dotenvExport.statusCode, 200, dotenvExport.body);
+  assert.equal(dotenvExport.json().data.format, "dotenv");
+  assert.equal(dotenvExport.json().data.filename, "api-project-development.env");
+  assert.match(dotenvExport.json().data.content, /^CACHE_URL="redis:\/\/api"/);
+  assert.equal(dotenvExport.json().data.secretCount, 4);
+  const flatJsonExport = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/exports?format=json`,
+    headers: headers(orgA, readerA),
+  });
+  assert.equal(flatJsonExport.statusCode, 200, flatJsonExport.body);
+  assert.equal(JSON.parse(flatJsonExport.json().data.content).DATABASE__HOST, "db.internal");
+  const nestedJsonExport = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/exports?format=json&nested=true&delimiter=__`,
+    headers: headers(orgA, readerA),
+  });
+  assert.equal(nestedJsonExport.statusCode, 200, nestedJsonExport.body);
+  assert.equal(JSON.parse(nestedJsonExport.json().data.content).DATABASE.HOST, "db.internal");
+  assert.equal(nestedJsonExport.json().data.nested, true);
+  const shellExport = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/exports?format=shell`,
+    headers: headers(orgA, readerA),
+  });
+  assert.equal(shellExport.statusCode, 200, shellExport.body);
+  assert.match(shellExport.json().data.content, /^export CACHE_URL='redis:\/\/api'/);
+  assert.equal(shellExport.body.includes("\"value\":"), false);
+  const exportAudits = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{
+    actor_type: string;
+    metadata: { details?: { format?: string; nested?: boolean; count?: number } };
+  }>("SELECT actor_type, metadata FROM audit_events WHERE action = 'secret.exported' ORDER BY id"));
+  assert.deepEqual(exportAudits.rows.map(({ metadata }) => metadata.details?.format), ["dotenv", "json", "json", "shell"]);
+  assert.equal(exportAudits.rows.every(({ actor_type }) => actor_type === "user"), true);
+  assert.equal(exportAudits.rows[2]?.metadata.details?.nested, true);
+  assert.equal(exportAudits.rows.every(({ metadata }) => metadata.details?.count === 4), true);
+  assert.equal(JSON.stringify(exportAudits.rows).includes("postgres://"), false);
+  const deletedNestedExportSecret = await app.inject({
+    method: "DELETE",
+    url: `/api/v1/secrets/${nestedExportSecret.json().data.id}`,
+    headers: headers(orgA, memberA),
+  });
+  assert.equal(deletedNestedExportSecret.statusCode, 200, deletedNestedExportSecret.body);
   const staleRollback = await app.inject({
     method: "POST",
     url: `/api/v1/secrets/${secretId}/versions/1/rollback`,
@@ -941,6 +998,13 @@ test("manages scoped API keys while revealing token material only at creation", 
   });
   assert.equal(wrongEnvironment.statusCode, 403);
   assert.equal(wrongEnvironment.json().error.code, "API_SCOPE_FORBIDDEN");
+  const wrongEnvironmentExport = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${productionId}/exports?format=json`,
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(wrongEnvironmentExport.statusCode, 403, wrongEnvironmentExport.body);
+  assert.equal(wrongEnvironmentExport.json().error.code, "API_SCOPE_FORBIDDEN");
 
   const crossEnvironmentPromotion = await app.inject({
     method: "POST",
@@ -980,6 +1044,13 @@ test("manages scoped API keys while revealing token material only at creation", 
   });
   assert.equal(readOnlyRuntime.statusCode, 200, readOnlyRuntime.body);
   assert.ok(readOnlyRuntime.headers.etag);
+  const readOnlyExport = await app.inject({
+    method: "GET",
+    url: `/api/v1/projects/${projectId}/environments/${developmentId}/exports?format=shell`,
+    headers: { authorization: `Bearer ${readOnlyToken}` },
+  });
+  assert.equal(readOnlyExport.statusCode, 200, readOnlyExport.body);
+  assert.equal(readOnlyExport.json().data.format, "shell");
   const runtimeAudit = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{
     actor_type: string;
     actor_api_key_id: string;
@@ -992,6 +1063,16 @@ test("manages scoped API keys while revealing token material only at creation", 
   assert.equal(runtimeAudit.rows[0]?.actor_type, "api_key");
   assert.ok((runtimeAudit.rows[0]?.metadata.details?.count ?? 0) > 0);
   assert.ok(Number.isInteger(runtimeAudit.rows[0]?.metadata.details?.configVersion));
+  const machineExportAudit = await database.withOrg(orgA, ownerA, (transaction) => transaction.query<{
+    actor_api_key_id: string;
+    metadata: { details?: { format?: string } };
+  }>(
+    `SELECT actor_api_key_id, metadata FROM audit_events
+     WHERE action = 'secret.exported' AND actor_api_key_id = $1 ORDER BY id DESC LIMIT 1`,
+    [readOnlyCreated.json().data.apiKey.id],
+  ));
+  assert.equal(machineExportAudit.rows[0]?.actor_api_key_id, readOnlyCreated.json().data.apiKey.id);
+  assert.equal(machineExportAudit.rows[0]?.metadata.details?.format, "shell");
   const readOnlyWrite = await app.inject({
     method: "POST",
     url: `/api/v1/projects/${projectId}/environments/${developmentId}/secrets`,

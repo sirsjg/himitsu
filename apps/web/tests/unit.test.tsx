@@ -218,6 +218,8 @@ test("secret client targets v1 routes, sends optimistic version preconditions, a
   assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { value: "replacement", changeNote: "rotation" });
   await client.listTags();
   assert.equal(calls[1]?.input, "/api/v1/tags?limit=100");
+  await client.exportSecrets("project/id", "environment/id", "json", true, "--");
+  assert.equal(calls[2]?.input, "/api/v1/projects/project%2Fid/environments/environment%2Fid/exports?format=json&nested=true&delimiter=--");
 
   const conflicting = createSecretClient(async () => new Response(
     JSON.stringify({ error: { message: "Version is stale" } }),
@@ -289,6 +291,7 @@ test("project detail renders environment browsing and masked secret editing cont
   assert.match(html, /Staging/);
   assert.match(html, /Production/);
   assert.match(html, /Bulk paste/);
+  assert.match(html, />Export</);
   assert.match(html, /Add secret/);
   assert.match(html, /Project consistency health/);
   assert.match(html, /Cross-environment diff/);

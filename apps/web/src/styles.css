@@ -331,6 +331,10 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .tag-picker legend span { color: var(--faint); font-size: 8px; }
 .tag-picker label { display: flex; align-items: center; gap: 5px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 9px; cursor: pointer; }
 .tag-picker label span { padding: 4px 7px; border: 1px solid; border-radius: 999px; }
+.export-formats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0; border: 0; }
+.export-formats legend { margin-bottom: 8px; color: var(--muted); font-size: 10px; font-weight: 650; }
+.export-formats label { display: flex; align-items: center; gap: 7px; padding: 11px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-size: 10px; cursor: pointer; }
+.export-formats label:has(input:checked) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .check-row input { accent-color: var(--accent); }
 .editor-sheet > footer { padding-top: 17px; border-top: 1px solid var(--line); }
 .bulk-sheet { width: min(680px, calc(100vw - 60px)); }
