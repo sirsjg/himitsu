@@ -1,0 +1,88 @@
+name: himitsu
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: himitsu
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d himitsu"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    build:
+      context: .
+      target: ops
+    environment:
+      MIGRATION_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/himitsu
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://himitsu_app:${APP_DATABASE_PASSWORD}@db:5432/himitsu
+      HIMITSU_MASTER_KEY_FILE: /run/secrets/master_key
+      HIMITSU_MASTER_KEY_ID: ${HIMITSU_MASTER_KEY_ID:-local-v1}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-20}
+    secrets:
+      - master_key
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    ports:
+      - "${HIMITSU_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  backup:
+    profiles: [ops]
+    build:
+      context: .
+      target: ops
+    entrypoint: [/usr/local/bin/backup.sh]
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/himitsu
+      BACKUP_DIR: /backups
+      BACKUP_PASSPHRASE_FILE: /run/secrets/backup_passphrase
+    secrets:
+      - backup_passphrase
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+
+secrets:
+  master_key:
+    file: ./secrets/master-key
+  backup_passphrase:
+    file: ./secrets/backup-passphrase

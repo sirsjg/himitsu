@@ -61,3 +61,12 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+
+  container-packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --env-file .env.example config --quiet
+      - run: docker build --target api --tag himitsu-api:test .
+      - run: docker build --target web --tag himitsu-web:test .
+      - run: docker build --target ops --tag himitsu-ops:test .

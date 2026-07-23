@@ -49,6 +49,8 @@ export interface ApiDependencies {
   readonly secrets: SecretService;
   readonly consistency: ConsistencyService;
   readonly rateLimits?: ApiRateLimitOptions;
+  readonly readiness?: () => Promise<void>;
+  readonly logger?: boolean;
 }
 
 export class ApiError extends Error {
@@ -626,10 +628,13 @@ function listSchema(item: unknown): Record<string, unknown> {
 }
 
 export async function buildApi(dependencies: ApiDependencies): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, ajv: { customOptions: { coerceTypes: true } } });
+  const app = Fastify({ logger: dependencies.logger ?? false, ajv: { customOptions: { coerceTypes: true } } });
   const contexts = new WeakMap<FastifyRequest, ApiRequestContext>();
   const rateLimiter = new InMemoryRateLimiter(dependencies.rateLimits);
   const routeAuthorization = new AuthorizationContextResolver();
+  const startedAt = Date.now();
+  let requestCount = 0;
+  let errorCount = 0;
   await app.register(swagger, {
     openapi: {
       openapi: "3.1.0",
@@ -670,8 +675,13 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     return payload;
   });
 
+  app.addHook("onResponse", async (_request, reply) => {
+    requestCount += 1;
+    if (reply.statusCode >= 500) errorCount += 1;
+  });
+
   app.addHook("onRequest", async (request, reply) => {
-    if (routePath(request) === "/api/v1/openapi.json") return;
+    if (["/api/v1/openapi.json", "/health/live", "/health/ready", "/metrics"].includes(routePath(request))) return;
     applyRateLimitHeaders(reply, rateLimiter.consume("ip", request.ip));
     if (routePath(request) === "/api/v1/cli/login") return;
     const context = await authenticateRequest(dependencies, request);
@@ -679,6 +689,34 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
       applyRateLimitHeaders(reply, rateLimiter.consume("api_key", context.apiKey.apiKeyId));
     }
     contexts.set(request, context);
+  });
+
+  app.get("/health/live", async () => ({ status: "ok" }));
+
+  app.get("/health/ready", async (_request, reply) => {
+    try {
+      await dependencies.readiness?.();
+      return { status: "ready" };
+    } catch {
+      return reply.status(503).send({ status: "not_ready" });
+    }
+  });
+
+  app.get("/metrics", async (_request, reply) => {
+    void reply.type("text/plain; version=0.0.4; charset=utf-8");
+    const uptime = Math.max(0, (Date.now() - startedAt) / 1000);
+    return [
+      "# HELP himitsu_http_requests_total Total HTTP responses served.",
+      "# TYPE himitsu_http_requests_total counter",
+      `himitsu_http_requests_total ${requestCount}`,
+      "# HELP himitsu_http_errors_total Total HTTP responses with a 5xx status.",
+      "# TYPE himitsu_http_errors_total counter",
+      `himitsu_http_errors_total ${errorCount}`,
+      "# HELP himitsu_process_uptime_seconds Process uptime in seconds.",
+      "# TYPE himitsu_process_uptime_seconds gauge",
+      `himitsu_process_uptime_seconds ${uptime.toFixed(3)}`,
+      "",
+    ].join("\n");
   });
 
   const withTenant = async <T>(
