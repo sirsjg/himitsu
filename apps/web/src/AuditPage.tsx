@@ -1,4 +1,5 @@
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { apiFetch } from "./session.js";
 
 export interface AuditEventView {
   readonly id: string;
@@ -76,13 +77,7 @@ export function createAuditClient(request: RequestFunction = (input, init) => fe
   };
 }
 
-const browserAuditClient = createAuditClient();
-
-export const demoAuditEvents: readonly AuditEventView[] = [
-  { id: "103", actor: { type: "user", id: "user-akari", label: "akari@example.com" }, action: "secret.updated", resource: { type: "secret", id: "DATABASE_URL" }, projectId: "project-atlas", environmentId: "production", ip: "203.0.113.18", userAgent: "Himitsu Web", metadata: { after: { version: 11 } }, occurredAt: "2026-07-22T08:42:00.000Z" },
-  { id: "102", actor: { type: "api_key", id: "api-key-ci", label: "Deploy pipeline" }, action: "secret.read", resource: { type: "secret", id: "STRIPE_SECRET_KEY" }, projectId: "project-atlas", environmentId: "production", ip: "198.51.100.24", userAgent: "himitsu-cli/0.1", metadata: { details: { operation: "runtime_fetch" } }, occurredAt: "2026-07-22T08:35:00.000Z" },
-  { id: "101", actor: { type: "user", id: "user-akari", label: "akari@example.com" }, action: "secret.imported", resource: { type: "environment", id: "development" }, projectId: "project-atlas", environmentId: "development", ip: "203.0.113.18", userAgent: "Himitsu Web", metadata: { details: { format: "dotenv", requested: 4 } }, occurredAt: "2026-07-22T07:58:00.000Z" },
-];
+const browserAuditClient = createAuditClient(apiFetch);
 
 const actionOptions = [
   "", "secret.created", "secret.read", "secret.updated", "secret.deleted", "secret.imported", "secret.exported",
@@ -94,7 +89,7 @@ const actionOptions = [
 export function AuditPage({
   role,
   client = browserAuditClient,
-  initialEvents = demoAuditEvents,
+  initialEvents = [],
 }: {
   role: "owner" | "admin" | "member" | "read_only";
   client?: AuditClient;

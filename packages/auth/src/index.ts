@@ -133,33 +133,58 @@ export const csrfCookie = {
   options: { httpOnly: false, secure: true, sameSite: "Strict", path: "/" },
 } as const;
 
+export interface CookieProfile {
+  readonly sessionName: string;
+  readonly csrfName: string;
+  readonly secure: boolean;
+}
+
+export const secureCookieProfile: CookieProfile = {
+  sessionName: sessionCookie.name,
+  csrfName: csrfCookie.name,
+  secure: true,
+};
+
+// Plain-HTTP local development only. Browsers silently drop Secure cookies on
+// http origins (except some localhost allowances), which makes login appear to
+// succeed while no session is stored. The __Host- prefix requires Secure, so
+// the insecure profile also uses unprefixed names.
+export const insecureCookieProfile: CookieProfile = {
+  sessionName: "himitsu_session",
+  csrfName: "himitsu_csrf",
+  secure: false,
+};
+
 function serializeCookie(
   name: string,
   value: string,
-  options: { readonly httpOnly: boolean; readonly maxAge: number },
+  options: { readonly httpOnly: boolean; readonly maxAge: number; readonly secure: boolean },
 ): string {
   return [
     `${name}=${encodeURIComponent(value)}`,
     "Path=/",
     `Max-Age=${options.maxAge}`,
-    "Secure",
+    options.secure ? "Secure" : "",
     options.httpOnly ? "HttpOnly" : "",
     "SameSite=Strict",
   ].filter(Boolean).join("; ");
 }
 
-export function sessionCookieHeaders(credentials: SessionCredentials): readonly [string, string] {
+export function sessionCookieHeaders(
+  credentials: SessionCredentials,
+  profile: CookieProfile = secureCookieProfile,
+): readonly [string, string] {
   const maxAge = Math.max(0, Math.floor((credentials.expiresAt.getTime() - Date.now()) / 1000));
   return [
-    serializeCookie(sessionCookie.name, credentials.sessionToken, { httpOnly: true, maxAge }),
-    serializeCookie(csrfCookie.name, credentials.csrfToken, { httpOnly: false, maxAge }),
+    serializeCookie(profile.sessionName, credentials.sessionToken, { httpOnly: true, maxAge, secure: profile.secure }),
+    serializeCookie(profile.csrfName, credentials.csrfToken, { httpOnly: false, maxAge, secure: profile.secure }),
   ];
 }
 
-export function clearSessionCookieHeaders(): readonly [string, string] {
+export function clearSessionCookieHeaders(profile: CookieProfile = secureCookieProfile): readonly [string, string] {
   return [
-    serializeCookie(sessionCookie.name, "", { httpOnly: true, maxAge: 0 }),
-    serializeCookie(csrfCookie.name, "", { httpOnly: false, maxAge: 0 }),
+    serializeCookie(profile.sessionName, "", { httpOnly: true, maxAge: 0, secure: profile.secure }),
+    serializeCookie(profile.csrfName, "", { httpOnly: false, maxAge: 0, secure: profile.secure }),
   ];
 }
 
@@ -355,6 +380,23 @@ export class AuthService {
     const session = await this.authenticate(sessionToken);
     this.verifyCsrf(session, csrfToken);
     await this.#pool.query("UPDATE sessions SET revoked_at = now() WHERE id = $1", [session.sessionId]);
+  }
+
+  /** Issues a fresh verification token for an unverified account; silently ignores unknown or already-verified emails. */
+  async resendEmailVerification(email: string): Promise<void> {
+    const normalized = normalizeEmail(email);
+    const result = await this.#pool.query<{ id: string; email: string; email_verified_at: Date | null }>(
+      "SELECT id, email, email_verified_at FROM users WHERE email_normalized = $1 AND disabled_at IS NULL",
+      [normalized],
+    );
+    const user = result.rows[0];
+    if (user === undefined || user.email_verified_at !== null) return;
+    const verificationToken = token();
+    await this.#pool.query(
+      "INSERT INTO email_verification_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)",
+      [user.id, digest(verificationToken), new Date(this.#now().getTime() + TOKEN_TTL_MS)],
+    );
+    await this.#delivery.sendEmailVerification(user.email, verificationToken);
   }
 
   async requestPasswordReset(email: string): Promise<void> {

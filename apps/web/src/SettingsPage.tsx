@@ -1,4 +1,5 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { apiFetch, csrfToken } from "./session.js";
 import { NavLink } from "react-router-dom";
 
 export type SettingsRole = "owner" | "admin" | "member" | "read_only";
@@ -86,9 +87,7 @@ type RequestFunction = (input: string, init?: RequestInit) => Promise<Response>;
 
 function browserCsrfToken(): string | null {
   if (typeof document === "undefined") return null;
-  const prefix = "__Host-himitsu_csrf=";
-  const cookie = document.cookie.split(";").map((value) => value.trim()).find((value) => value.startsWith(prefix));
-  return cookie === undefined ? null : decodeURIComponent(cookie.slice(prefix.length));
+  return csrfToken();
 }
 
 export function createSettingsClient(request: RequestFunction = (input, init) => fetch(input, init)): SettingsClient {
@@ -130,7 +129,7 @@ export function createSettingsClient(request: RequestFunction = (input, init) =>
   };
 }
 
-const browserSettingsClient = createSettingsClient();
+const browserSettingsClient = createSettingsClient(apiFetch);
 
 function when(value: string | null): string {
   return value === null ? "Never" : new Date(value).toLocaleString();

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { ApiKeyService } from "@himitsu/api-keys";
 import { TransactionalAuditLog } from "@himitsu/audit";
-import { AuthService } from "@himitsu/auth";
+import { AuthService, insecureCookieProfile, secureCookieProfile } from "@himitsu/auth";
 import { AuthorizationContextResolver } from "@himitsu/authz";
 import { ConsistencyService } from "@himitsu/consistency";
 import { LocalMasterKey } from "@himitsu/crypto";
@@ -35,6 +35,38 @@ async function masterKey(): Promise<string> {
   return file ? (await readFile(file, "utf8")).trim() : required("HIMITSU_MASTER_KEY_BASE64");
 }
 
+// "noop" (default) drops delivery emails: safe for production until a real adapter is configured,
+// but signup and invitations cannot complete. "log" prints action links to stdout for local
+// development only — the links carry live tokens, so never enable it where logs are shared.
+function emailDelivery(): { auth: ConstructorParameters<typeof AuthService>[1]; tenancy: ConstructorParameters<typeof TenancyService>[1] } {
+  const mode = process.env.HIMITSU_EMAIL_DELIVERY?.trim() || "noop";
+  if (mode === "noop") {
+    return {
+      auth: { async sendEmailVerification() {}, async sendPasswordReset() {} },
+      tenancy: { async sendOrganizationInvitation() {} },
+    };
+  }
+  if (mode !== "log") throw new Error("HIMITSU_EMAIL_DELIVERY must be \"noop\" or \"log\"");
+  const origin = (process.env.HIMITSU_APP_ORIGIN?.trim() || "http://localhost:8080").replace(/\/+$/, "");
+  const announce = (kind: string, email: string, link: string): void => {
+    console.log(JSON.stringify({ level: "warn", msg: `insecure log email delivery: ${kind}`, email, link }));
+  };
+  return {
+    auth: {
+      async sendEmailVerification(email, token) { announce("email verification", email, `${origin}/verify-email?token=${encodeURIComponent(token)}`); },
+      async sendPasswordReset(email, token) { announce("password reset", email, `${origin}/password-reset/confirm?token=${encodeURIComponent(token)}`); },
+    },
+    tenancy: {
+      async sendOrganizationInvitation({ email, token }) { announce("organization invitation", email, `${origin}/invites/${encodeURIComponent(token)}`); },
+    },
+  };
+}
+
+const delivery = emailDelivery();
+const insecureCookies = process.env.HIMITSU_INSECURE_HTTP_COOKIES?.trim() === "true";
+if (insecureCookies) {
+  console.log(JSON.stringify({ level: "warn", msg: "HIMITSU_INSECURE_HTTP_COOKIES is enabled: session cookies are sent without the Secure flag. Local development only." }));
+}
 const pool = new Pool({ connectionString: required("DATABASE_URL"), max: positiveInteger(process.env.DATABASE_POOL_SIZE, 20, "DATABASE_POOL_SIZE") });
 const audit = new TransactionalAuditLog(pool);
 const resolver = new AuthorizationContextResolver();
@@ -46,8 +78,8 @@ const secrets = new SecretService(
 );
 const app = await buildApi({
   database,
-  tenancy: new TenancyService(database, { async sendOrganizationInvitation() {} }, audit),
-  auth: new AuthService(pool, { async sendEmailVerification() {}, async sendPasswordReset() {} }),
+  tenancy: new TenancyService(database, delivery.tenancy, audit),
+  auth: new AuthService(pool, delivery.auth),
   apiKeys: new ApiKeyService(pool, resolver, audit),
   audit,
   projects: new ProjectService(resolver, audit),
@@ -56,6 +88,7 @@ const app = await buildApi({
   consistency: new ConsistencyService(resolver, secrets, audit),
   readiness: async () => { await pool.query("SELECT 1"); },
   logger: true,
+  cookies: insecureCookies ? insecureCookieProfile : secureCookieProfile,
 });
 
 pool.on("error", (error) => app.log.error({ err: error }, "unexpected idle PostgreSQL client error"));

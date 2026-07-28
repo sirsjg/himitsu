@@ -16,28 +16,36 @@ import {
   useNavigate,
   useOutletContext,
   useParams,
+  useSearchParams,
 } from "react-router-dom";
-import { SecretWorkspace } from "./SecretWorkspace.js";
+import { SecretWorkspace, type EnvironmentView } from "./SecretWorkspace.js";
 import { AuditPage } from "./AuditPage.js";
 import { SettingsPage } from "./SettingsPage.js";
-
-export interface OrganizationOption {
-  readonly id: string;
-  readonly name: string;
-  readonly role: "owner" | "admin" | "member" | "read_only";
-}
+import {
+  ApiRequestError,
+  acceptInvitation,
+  apiFetch,
+  confirmPasswordReset,
+  createOrganization,
+  fetchSession,
+  login,
+  logout,
+  requestPasswordReset,
+  resendVerification,
+  signup,
+  switchOrganization,
+  verifyEmail,
+  type RequestFunction,
+  type SessionOrganization,
+  type SessionView,
+} from "./session.js";
 
 export interface ProjectQuickLink {
   readonly id: string;
   readonly name: string;
   readonly slug: string;
-  readonly secrets: readonly string[];
+  readonly environments: readonly string[];
   readonly tags: readonly string[];
-}
-
-export interface CurrentUser {
-  readonly name: string;
-  readonly email: string;
 }
 
 export interface CommandItem {
@@ -49,17 +57,6 @@ export interface CommandItem {
 }
 
 export type AuthMode = "login" | "signup" | "password-reset";
-
-export const demoOrganizations: readonly OrganizationOption[] = [
-  { id: "org-studio", name: "Northstar Studio", role: "owner" },
-  { id: "org-labs", name: "Field Labs", role: "member" },
-];
-
-export const demoProjects: readonly ProjectQuickLink[] = [
-  { id: "project-atlas", name: "Atlas API", slug: "atlas-api", secrets: ["DATABASE_URL", "STRIPE_SECRET_KEY"], tags: ["database", "pci"] },
-  { id: "project-lantern", name: "Lantern Web", slug: "lantern-web", secrets: ["AUTH_ORIGIN", "SENTRY_DSN"], tags: ["third-party"] },
-  { id: "project-relay", name: "Relay Worker", slug: "relay-worker", secrets: ["QUEUE_URL", "WORKER_TOKEN"], tags: ["infrastructure"] },
-];
 
 export function filterProjectLinks(projects: readonly ProjectQuickLink[], query: string, activeTag: string | null): readonly ProjectQuickLink[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
@@ -88,22 +85,27 @@ export function validateAuthForm(
   return null;
 }
 
-async function postJson(path: string, body: Readonly<Record<string, string>>): Promise<void> {
-  const response = await fetch(path, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
-    throw new Error(payload?.error?.message ?? "The request could not be completed.");
-  }
+interface ApiProject {
+  readonly id: string;
+  readonly name: string;
+  readonly slug: string;
+  readonly settings?: { readonly defaultEnvironments?: readonly string[] };
+  readonly tags?: readonly { readonly name: string }[];
+}
+
+function toProjectLink(project: ApiProject): ProjectQuickLink {
+  return {
+    id: project.id,
+    name: project.name,
+    slug: project.slug,
+    environments: project.settings?.defaultEnvironments ?? [],
+    tags: (project.tags ?? []).map(({ name }) => name),
+  };
 }
 
 export async function createProject(
   input: { readonly name: string; readonly slug: string },
-  request: typeof fetch = fetch,
+  request: RequestFunction = apiFetch,
 ): Promise<ProjectQuickLink> {
   const response = await request("/api/v1/projects", {
     method: "POST",
@@ -111,71 +113,202 @@ export async function createProject(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   });
-  const payload = await response.json().catch(() => null) as {
-    data?: { id?: string; name?: string; slug?: string; tags?: readonly { name: string }[] };
-    error?: { message?: string };
-  } | null;
+  const payload = await response.json().catch(() => null) as { data?: ApiProject; error?: { message?: string } } | null;
   if (!response.ok) throw new Error(payload?.error?.message ?? "Project could not be created.");
   if (payload?.data?.id === undefined || payload.data.name === undefined || payload.data.slug === undefined) {
     throw new Error("Project response was incomplete.");
   }
-  return { id: payload.data.id, name: payload.data.name, slug: payload.data.slug, secrets: [], tags: payload.data.tags?.map(({ name }) => name) ?? [] };
+  return toProjectLink(payload.data);
+}
+
+export async function fetchProjects(request: RequestFunction = apiFetch): Promise<readonly ProjectQuickLink[]> {
+  const response = await request("/api/v1/projects?limit=100");
+  const payload = await response.json().catch(() => null) as { data?: readonly ApiProject[]; error?: { message?: string } } | null;
+  if (!response.ok || payload?.data === undefined) throw new Error(payload?.error?.message ?? "Projects could not be loaded.");
+  return payload.data.map(toProjectLink);
+}
+
+async function fetchEnvironments(projectId: string, request: RequestFunction = apiFetch): Promise<readonly EnvironmentView[]> {
+  const response = await request(`/api/v1/projects/${encodeURIComponent(projectId)}/environments`);
+  const payload = await response.json().catch(() => null) as {
+    data?: readonly { id: string; name: string; slug: string; protected: boolean }[];
+    error?: { message?: string };
+  } | null;
+  if (!response.ok || payload?.data === undefined) throw new Error(payload?.error?.message ?? "Environments could not be loaded.");
+  return payload.data.map(({ id, name, slug, protected: isProtected }) => ({ id, name, slug, protected: isProtected }));
 }
 
 export interface AppRoutesProps {
-  readonly organizations?: readonly OrganizationOption[];
-  readonly projects?: readonly ProjectQuickLink[];
-  readonly user?: CurrentUser;
+  /** Session injection for tests; the browser bootstraps from GET /api/v1/session. */
+  readonly initialSession?: SessionView | null;
+  readonly initialProjects?: readonly ProjectQuickLink[];
 }
 
-export function AppRoutes({
-  organizations = demoOrganizations,
-  projects = demoProjects,
-  user = { name: "Akari Mori", email: "akari@example.com" },
-}: AppRoutesProps): ReactNode {
-  const [projectList, setProjectList] = useState(projects);
-  const addProject = (project: ProjectQuickLink) => setProjectList((current) => [...current, project]);
+export function AppRoutes({ initialSession, initialProjects }: AppRoutesProps = {}): ReactNode {
+  const [session, setSession] = useState<SessionView | null | undefined>(initialSession);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  useEffect(() => {
+    if (session !== undefined) return;
+    let cancelled = false;
+    fetchSession()
+      .then((next) => { if (!cancelled) setSession(next); })
+      .catch(() => { if (!cancelled) setSessionError("The workspace could not be reached. Retry in a moment."); });
+    return () => { cancelled = true; };
+  }, [session]);
   return (
     <Routes>
       <Route path="/login" element={<AuthPage mode="login" />} />
       <Route path="/signup" element={<AuthPage mode="signup" />} />
       <Route path="/password-reset" element={<AuthPage mode="password-reset" />} />
+      <Route path="/password-reset/confirm" element={<ResetConfirmPage />} />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
       <Route path="/invites/:token" element={<InvitePage />} />
-      <Route path="/app" element={<AppShell organizations={organizations} projects={projectList} user={user} />}>
+      <Route
+        path="/app"
+        element={<AuthenticatedApp session={session} sessionError={sessionError} onSession={setSession} initialProjects={initialProjects} />}
+      >
         <Route index element={<Navigate to="projects" replace />} />
-        <Route path="projects" element={<ProjectsPage projects={projectList} onCreated={addProject} />} />
-        <Route path="projects/:projectId" element={<ProjectLanding projects={projectList} />} />
+        <Route path="projects" element={<ProjectsIndexRoute />} />
+        <Route path="projects/:projectId" element={<ProjectLandingRoute />} />
         <Route path="audit" element={<AuditRoute />} />
-        <Route path="settings" element={<SettingsRoute projects={projectList} />} />
+        <Route path="settings" element={<SettingsRoute />} />
       </Route>
       <Route path="*" element={<Navigate to="/app/projects" replace />} />
     </Routes>
   );
 }
 
-function AppShell({
-  organizations,
-  projects,
-  user,
-}: Required<Pick<AppRoutesProps, "organizations" | "projects" | "user">>): ReactNode {
+interface WorkspaceContext {
+  readonly role: SessionOrganization["role"];
+  readonly projects: readonly ProjectQuickLink[] | undefined;
+  readonly addProject: (project: ProjectQuickLink) => void;
+}
+
+function AuthenticatedApp({ session, sessionError, onSession, initialProjects }: {
+  session: SessionView | null | undefined;
+  sessionError: string | null;
+  onSession: (session: SessionView) => void;
+  initialProjects?: readonly ProjectQuickLink[] | undefined;
+}): ReactNode {
+  const activeOrgId = session === null || session === undefined ? null : session.activeOrgId;
+  const [projects, setProjects] = useState<readonly ProjectQuickLink[] | undefined>(initialProjects);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeOrgId === null) return;
+    let cancelled = false;
+    setProjectsError(null);
+    fetchProjects()
+      .then((rows) => { if (!cancelled) setProjects(rows); })
+      .catch((reason: unknown) => { if (!cancelled) setProjectsError(reason instanceof Error ? reason.message : "Projects could not be loaded."); });
+    return () => { cancelled = true; };
+  }, [activeOrgId]);
+
+  if (sessionError !== null) return <SplashScreen message={sessionError} />;
+  if (session === undefined) return <SplashScreen message="Opening your workspace…" />;
+  if (session === null) return <Navigate to="/login" replace />;
+  if (session.activeOrgId === null) return <OrgSetupPage session={session} onSession={onSession} />;
+  return (
+    <AppShell
+      session={session}
+      onSession={onSession}
+      projects={projects}
+      projectsError={projectsError}
+      addProject={(project) => setProjects((current) => [...(current ?? []), project])}
+    />
+  );
+}
+
+function SplashScreen({ message }: { message: string }): ReactNode {
+  return (
+    <div className="auth-layout splash-screen">
+      <main className="auth-panel">
+        <div className="auth-card">
+          <a className="brand" href="/login"><BrandMark /><span>himitsu</span></a>
+          <p role="status">{message}</p>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function OrgSetupPage({ session, onSession }: { session: SessionView; onSession: (session: SessionView) => void }): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [slugEdited, setSlugEdited] = useState(false);
+  const suggestSlug = (value: string): string =>
+    value.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+
+  const open = async (orgId: string) => {
+    setBusy(true);
+    setError(null);
+    try { onSession(await switchOrganization(orgId)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "The organization could not be opened."); setBusy(false); }
+  };
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try { onSession((await createOrganization(name, slug)).session); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "The organization could not be created."); setBusy(false); }
+  };
+
+  return (
+    <div className="auth-layout">
+      <section className="auth-story"><a className="brand" href="/login"><BrandMark /><span>himitsu</span></a><div><span className="kicker">ONE TENANT, ONE BOUNDARY</span><blockquote>Every membership, key, and audit line lives inside the organization you choose here.</blockquote></div></section>
+      <main className="auth-panel">
+        <div className="auth-card org-setup">
+          <span className="kicker">Signed in as {session.user.email}</span>
+          <h1>Choose your organization.</h1>
+          {session.organizations.length > 0 ? (
+            <ul className="org-choice-list" aria-label="Your organizations">
+              {session.organizations.map((organization) => (
+                <li key={organization.id}>
+                  <button type="button" disabled={busy} onClick={() => void open(organization.id)}>
+                    <span>{organization.name}</span>
+                    <small>{organization.role.replace("_", " ")}</small>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : <p>You are not a member of an organization yet. Create one to start an encrypted workspace.</p>}
+          <form aria-label="Create organization" onSubmit={(event) => void create(event)}>
+            <label>Organization name<input value={name} required minLength={1} maxLength={120} placeholder="Northstar Studio" onChange={(event) => { setName(event.target.value); if (!slugEdited) setSlug(suggestSlug(event.target.value)); }} /></label>
+            <label>Slug<input value={slug} required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} placeholder="northstar-studio" onChange={(event) => { setSlugEdited(true); setSlug(event.target.value); }} /></label>
+            {error ? <p className="form-status error" role="alert">{error}</p> : null}
+            <button className="auth-submit" type="submit" disabled={busy}>{busy ? "Working…" : "Create organization"}<span>→</span></button>
+          </form>
+          <div className="auth-links"><button className="link-button" type="button" onClick={() => { void logout().finally(() => window.location.assign("/login")); }}>Sign out</button></div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function AppShell({ session, onSession, projects, projectsError, addProject }: {
+  session: SessionView;
+  onSession: (session: SessionView) => void;
+  projects: readonly ProjectQuickLink[] | undefined;
+  projectsError: string | null;
+  addProject: (project: ProjectQuickLink) => void;
+}): ReactNode {
   const navigate = useNavigate();
-  const [organizationId, setOrganizationId] = useState(organizations[0]?.id ?? "");
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const activeOrg = organizations.find(({ id }) => id === organizationId) ?? organizations[0];
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const organizations = session.organizations;
+  const activeOrg = organizations.find(({ id }) => id === session.activeOrgId);
   const commands = useMemo<readonly CommandItem[]>(() => [
     { id: "nav-projects", label: "Projects", eyebrow: "Navigate", to: "/app/projects", search: "projects navigate" },
     { id: "nav-audit", label: "Audit log", eyebrow: "Navigate", to: "/app/audit", search: "audit governance navigate" },
     { id: "nav-settings", label: "Settings", eyebrow: "Navigate", to: "/app/settings", search: "settings members api keys tags navigate" },
-    ...projects.flatMap((project) => [
-      { id: `project-${project.id}`, label: project.name, eyebrow: "Project", to: `/app/projects/${project.id}`, search: `${project.name} ${project.slug} project`.toLocaleLowerCase() },
-      ...project.secrets.map((secret) => ({
-        id: `secret-${project.id}-${secret}`,
-        label: secret,
-        eyebrow: project.name,
-        to: `/app/projects/${project.id}?secret=${encodeURIComponent(secret)}`,
-        search: `${secret} ${project.name} ${project.slug} secret`.toLocaleLowerCase(),
-      })),
-    ]),
+    ...(projects ?? []).map((project) => ({
+      id: `project-${project.id}`,
+      label: project.name,
+      eyebrow: "Project",
+      to: `/app/projects/${project.id}`,
+      search: `${project.name} ${project.slug} project`.toLocaleLowerCase(),
+    })),
   ], [projects]);
 
   useEffect(() => {
@@ -189,6 +322,18 @@ function AppShell({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  const switchOrg = async (orgId: string) => {
+    setSwitchError(null);
+    try {
+      onSession(await switchOrganization(orgId));
+      navigate("/app/projects");
+    } catch (reason) {
+      setSwitchError(reason instanceof Error ? reason.message : "The organization could not be switched.");
+    }
+  };
+
+  const context: WorkspaceContext = { role: activeOrg?.role ?? "read_only", projects, addProject };
 
   return (
     <div className="app-frame">
@@ -212,12 +357,12 @@ function AppShell({
           <label className="org-switcher">
             <span className="sr-only">Active organization</span>
             <span className="org-monogram" aria-hidden="true">{activeOrg?.name.slice(0, 1) ?? "H"}</span>
-            <select value={organizationId} onChange={(event) => setOrganizationId(event.target.value)}>
+            <select value={session.activeOrgId ?? ""} onChange={(event) => void switchOrg(event.target.value)}>
               {organizations.map((organization) => (
                 <option key={organization.id} value={organization.id}>{organization.name}</option>
               ))}
             </select>
-            <span className="role-pill">{activeOrg?.role.replace("_", " ")}</span>
+            <span className="role-pill">{(activeOrg?.role ?? "read_only").replace("_", " ")}</span>
           </label>
           <div className="topbar-actions">
             <button className="command-trigger" type="button" onClick={() => setPaletteOpen(true)}>
@@ -227,17 +372,21 @@ function AppShell({
             </button>
             <ThemeToggle />
             <details className="user-menu">
-              <summary aria-label="Open user menu"><span>{initials(user.name)}</span></summary>
+              <summary aria-label="Open user menu"><span>{initials(session.user.email)}</span></summary>
               <div className="user-popover">
-                <strong>{user.name}</strong>
-                <small>{user.email}</small>
+                <strong>{session.user.email}</strong>
+                <small>Session expires {new Date(session.expiresAt).toLocaleString()}</small>
                 <hr />
-                <a href="/login">Sign out</a>
+                <button className="link-button" type="button" onClick={() => { void logout().finally(() => window.location.assign("/login")); }}>Sign out</button>
               </div>
             </details>
           </div>
         </header>
-        <main className="content"><Outlet context={{ role: activeOrg?.role ?? "read_only" }} /></main>
+        <main className="content">
+          {switchError ? <p className="form-status error" role="alert">{switchError}</p> : null}
+          {projectsError ? <p className="form-status error" role="alert">{projectsError}</p> : null}
+          <Outlet context={context} />
+        </main>
       </div>
       {paletteOpen ? (
         <CommandPalette
@@ -250,14 +399,24 @@ function AppShell({
   );
 }
 
+function ProjectsIndexRoute(): ReactNode {
+  const { projects, addProject } = useOutletContext<WorkspaceContext>();
+  return <ProjectsPage projects={projects} onCreated={addProject} />;
+}
+
+function ProjectLandingRoute(): ReactNode {
+  const { projects } = useOutletContext<WorkspaceContext>();
+  return <ProjectLanding projects={projects} />;
+}
+
 function AuditRoute(): ReactNode {
-  const { role } = useOutletContext<{ role: OrganizationOption["role"] }>();
+  const { role } = useOutletContext<WorkspaceContext>();
   return <AuditPage role={role} />;
 }
 
-function SettingsRoute({ projects }: { projects: readonly ProjectQuickLink[] }): ReactNode {
-  const { role } = useOutletContext<{ role: OrganizationOption["role"] }>();
-  return <SettingsPage role={role} projects={projects.map(({ id, name }) => ({ id, name }))} />;
+function SettingsRoute(): ReactNode {
+  const { role, projects } = useOutletContext<WorkspaceContext>();
+  return <SettingsPage role={role} projects={(projects ?? []).map(({ id, name }) => ({ id, name }))} />;
 }
 
 function NavigationLink({ to, label, icon }: { to: string; label: string; icon: IconName }): ReactNode {
@@ -276,13 +435,13 @@ function CommandPalette({ items, onClose, onSelect }: {
   return (
     <div className="palette-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette">
-        <div className="palette-search"><Icon name="search" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects, secrets, and pages…" /><kbd>esc</kbd></div>
+        <div className="palette-search"><Icon name="search" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects and pages…" /><kbd>esc</kbd></div>
         <div className="palette-results">
           {results.length > 0 ? results.map((item) => (
             <button key={item.id} type="button" onClick={() => onSelect(item.to)}>
               <span><small>{item.eyebrow}</small>{item.label}</span><span aria-hidden="true">↗</span>
             </button>
-          )) : <p className="empty-result">No matches. Try a project name or secret key.</p>}
+          )) : <p className="empty-result">No matches. Try a project name or page.</p>}
         </div>
         <footer><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span></footer>
       </section>
@@ -290,15 +449,17 @@ function CommandPalette({ items, onClose, onSelect }: {
   );
 }
 
-function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuickLink[]; onCreated: (project: ProjectQuickLink) => void }): ReactNode {
+function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuickLink[] | undefined; onCreated: (project: ProjectQuickLink) => void }): ReactNode {
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
-  const tags = [...new Set(projects.flatMap((project) => project.tags))].sort();
-  const visibleProjects = useMemo(() => filterProjectLinks(projects, query, activeTag), [projects, query, activeTag]);
+  const loaded = projects ?? [];
+  const tags = [...new Set(loaded.flatMap((project) => project.tags))].sort();
+  const environmentCount = new Set(loaded.flatMap((project) => project.environments)).size;
+  const visibleProjects = useMemo(() => filterProjectLinks(loaded, query, activeTag), [loaded, query, activeTag]);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -324,20 +485,21 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
         <footer><button className="secondary-button" type="button" onClick={() => setCreating(false)}>Cancel</button><button className="primary-button" type="submit" disabled={busy}>{busy ? "Creating…" : "Create project"}</button></footer>
       </form> : null}
       <section className="signal-strip" aria-label="Workspace health">
-        <Metric value={projects.length.toString().padStart(2, "0")} label="active projects" />
-        <Metric value="03" label="environments" />
+        <Metric value={loaded.length.toString().padStart(2, "0")} label="active projects" />
+        <Metric value={environmentCount.toString().padStart(2, "0")} label="environments" />
         <Metric value="100%" label="encrypted" accent />
         <Metric value="0" label="open alerts" />
       </section>
-      {projects.length === 0 ? <FirstRunChecklist onCreate={() => setCreating(true)} /> : <><section className="secret-toolbar project-filters" aria-label="Filter projects"><label className="secret-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search projects</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects or tags" /></label><div className="tag-filters"><button type="button" className={activeTag === null ? "active" : ""} onClick={() => setActiveTag(null)}>All</button>{tags.map((tag) => <button type="button" key={tag} className={activeTag === tag ? "active" : ""} onClick={() => setActiveTag(tag)}>#{tag}</button>)}</div><span className="row-count">{visibleProjects.length} / {projects.length}</span></section>
+      {projects === undefined ? <section className="quiet-panel" aria-busy="true"><BrandMark /><h2>Loading projects…</h2><p>Fetching the encrypted workspaces in this organization.</p></section>
+        : loaded.length === 0 ? <FirstRunChecklist onCreate={() => setCreating(true)} /> : <><section className="secret-toolbar project-filters" aria-label="Filter projects"><label className="secret-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search projects</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects or tags" /></label><div className="tag-filters"><button type="button" className={activeTag === null ? "active" : ""} onClick={() => setActiveTag(null)}>All</button>{tags.map((tag) => <button type="button" key={tag} className={activeTag === tag ? "active" : ""} onClick={() => setActiveTag(tag)}>#{tag}</button>)}</div><span className="row-count">{visibleProjects.length} / {loaded.length}</span></section>
       <section className="project-grid" aria-label="Projects">
         {visibleProjects.map((project, index) => (
           <NavLink className="project-card" to={`/app/projects/${project.id}`} key={project.id}>
-            <span className="card-index">0{index + 1}</span>
+            <span className="card-index">{(index + 1).toString().padStart(2, "0")}</span>
             <div><small>PROJECT</small><h2>{project.name}</h2><p>{project.slug}</p></div>
-            <div className="environment-row"><span>DEV</span><span>STG</span><span>PRD</span></div>
+            <div className="environment-row">{project.environments.slice(0, 3).map((environment) => <span key={environment}>{environment.slice(0, 3).toUpperCase()}</span>)}</div>
             <div className="row-tags">{project.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>
-            <footer><span>{project.secrets.length} indexed keys</span><span>View project →</span></footer>
+            <footer><span>{project.environments.length} environments</span><span>View project →</span></footer>
           </NavLink>
         ))}
       </section></>}
@@ -349,13 +511,26 @@ function FirstRunChecklist({ onCreate }: { onCreate: () => void }): ReactNode {
   return <section className="onboarding-panel" aria-labelledby="onboarding-heading"><header><span className="kicker">First-run checklist</span><h2 id="onboarding-heading">Build your first encrypted workflow.</h2><p>Four small steps take a new organization from an empty workspace to CI-ready secret delivery.</p></header><ol><li className="complete"><i>✓</i><span><strong>Organization ready</strong><small>Your tenant boundary and audit trail are active.</small></span></li><li className="current"><i>2</i><span><strong>Create a project</strong><small>Projects group environments and their encrypted configuration.</small></span><button className="primary-button" type="button" onClick={onCreate}>Create first project</button></li><li><i>3</i><span><strong>Import your .env</strong><small>Open the project and use Bulk paste to preview before writing.</small></span></li><li><i>4</i><span><strong>Connect CI or runtime</strong><small>Create a scoped read-only API key in Settings, then use the CLI or runtime endpoint.</small></span></li></ol><footer><span>The repository guide mirrors this checklist with copy-ready CLI and CI commands.</span><NavLink to="/app/settings">Prepare CI access →</NavLink></footer></section>;
 }
 
-function ProjectLanding({ projects }: { projects: readonly ProjectQuickLink[] }): ReactNode {
+function ProjectLanding({ projects }: { projects: readonly ProjectQuickLink[] | undefined }): ReactNode {
   const { projectId } = useParams();
-  const project = projects.find(({ id }) => id === projectId);
+  const [environments, setEnvironments] = useState<readonly EnvironmentView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const project = projects?.find(({ id }) => id === projectId);
+  useEffect(() => {
+    if (projectId === undefined) return;
+    let cancelled = false;
+    setEnvironments(null);
+    setError(null);
+    fetchEnvironments(projectId)
+      .then((rows) => { if (!cancelled) setEnvironments(rows); })
+      .catch((reason: unknown) => { if (!cancelled) setError(reason instanceof Error ? reason.message : "Environments could not be loaded."); });
+    return () => { cancelled = true; };
+  }, [projectId]);
+  if (projects === undefined) return <SectionPage eyebrow="Project" title="Loading project…" copy="Fetching the project list for this organization." />;
   if (project === undefined) return <SectionPage eyebrow="Project" title="Project not found" copy="This project is not available in the active organization." />;
-  return project.secrets.length === 0
-    ? <SecretWorkspace projectId={project.id} projectName={project.name} initialSecrets={[]} />
-    : <SecretWorkspace projectId={project.id} projectName={project.name} />;
+  if (error !== null) return <SectionPage eyebrow="Project" title={project.name} copy={error} />;
+  if (environments === null) return <SectionPage eyebrow="Project" title={project.name} copy="Loading environments…" />;
+  return <SecretWorkspace key={project.id} projectId={project.id} projectName={project.name} environments={environments} />;
 }
 
 function SectionPage({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }): ReactNode {
@@ -374,7 +549,22 @@ function AuthPage({ mode }: { mode: AuthMode }): ReactNode {
   const emailId = useId();
   const passwordId = useId();
   const confirmId = useId();
-  const [status, setStatus] = useState<{ kind: "idle" | "busy" | "success" | "error"; message?: string }>({ kind: "idle" });
+  const [searchParams] = useSearchParams();
+  const expired = searchParams.get("reason") === "expired";
+  const [status, setStatus] = useState<{ kind: "idle" | "busy" | "success" | "error"; message?: string }>(
+    expired && mode === "login" ? { kind: "error", message: "Your session ended. Sign in again to continue." } : { kind: "idle" },
+  );
+  const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
+  const resend = async () => {
+    if (unverifiedEmail === null) return;
+    setStatus({ kind: "busy" });
+    try {
+      await resendVerification(unverifiedEmail);
+      setStatus({ kind: "success", message: `A new verification link is on its way to ${unverifiedEmail}. Open it, then sign in.` });
+    } catch (reason) {
+      setStatus({ kind: "error", message: reason instanceof Error ? reason.message : "The verification email could not be sent." });
+    }
+  };
   const copy = mode === "login"
     ? { eyebrow: "Welcome back", title: "Enter the vault.", sub: "Your organization’s secrets are waiting—encrypted, traced, and exactly where you left them.", button: "Sign in" }
     : mode === "signup"
@@ -392,11 +582,26 @@ function AuthPage({ mode }: { mode: AuthMode }): ReactNode {
     const error = validateAuthForm(mode, values);
     if (error !== null) { setStatus({ kind: "error", message: error }); return; }
     setStatus({ kind: "busy" });
+    setUnverifiedEmail(null);
     try {
-      await postJson(`/api/v1/auth/${mode}`, values);
-      setStatus({ kind: "success", message: mode === "login" ? "Signed in. Opening your workspace…" : "Check your inbox for the next step." });
-      if (mode === "login" && typeof window !== "undefined") window.setTimeout(() => window.location.assign("/app/projects"), 350);
+      if (mode === "login") {
+        await login(values.email, values.password);
+        setStatus({ kind: "success", message: "Signed in. Opening your workspace…" });
+        window.location.assign("/app/projects");
+      } else if (mode === "signup") {
+        await signup(values.email, values.password);
+        setUnverifiedEmail(values.email.trim());
+        setStatus({ kind: "success", message: "Account created. Open the verification link we sent to your email, then sign in." });
+      } else {
+        await requestPasswordReset(values.email);
+        setStatus({ kind: "success", message: "If that address belongs to an account, a recovery link is on its way." });
+      }
     } catch (requestError) {
+      if (requestError instanceof ApiRequestError && requestError.code === "EMAIL_NOT_VERIFIED") {
+        setUnverifiedEmail(values.email.trim());
+        setStatus({ kind: "error", message: "This email address has not been verified yet. Open the verification link from your signup email first." });
+        return;
+      }
       setStatus({ kind: "error", message: requestError instanceof Error ? requestError.message : "The request could not be completed." });
     }
   };
@@ -411,7 +616,8 @@ function AuthPage({ mode }: { mode: AuthMode }): ReactNode {
           <label htmlFor={emailId}>Work email<input id={emailId} name="email" type="email" autoComplete="email" required placeholder="you@company.com" /></label>
           {mode !== "password-reset" ? <label htmlFor={passwordId}>Password<input id={passwordId} name="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={12} placeholder="At least 12 characters" /></label> : null}
           {mode === "signup" ? <label htmlFor={confirmId}>Confirm password<input id={confirmId} name="confirmPassword" type="password" autoComplete="new-password" required minLength={12} /></label> : null}
-          {status.message ? <p className={`form-status ${status.kind}`} role="status">{status.message}</p> : null}
+          {status.message ? <p className={`form-status ${status.kind}`} role={status.kind === "error" ? "alert" : "status"}>{status.message}</p> : null}
+          {unverifiedEmail !== null ? <p className="resend-verification">Didn’t receive an email? <button className="link-button" type="button" disabled={status.kind === "busy"} onClick={() => void resend()}>Send it again</button></p> : null}
           <button className="auth-submit" type="submit" disabled={status.kind === "busy"}>{status.kind === "busy" ? "Working…" : copy.button}<span>→</span></button>
           <AuthLinks mode={mode} />
         </form>
@@ -426,14 +632,94 @@ function AuthLinks({ mode }: { mode: AuthMode }): ReactNode {
   return <div className="auth-links"><a href="/login">← Back to sign in</a></div>;
 }
 
+function VerifyEmailPage(): ReactNode {
+  const [searchParams] = useSearchParams();
+  const token = searchParams.get("token") ?? "";
+  const [status, setStatus] = useState(token === "" ? "This verification link is incomplete. Open the full link from your email." : "Verifying your email address…");
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    if (token === "") return;
+    let cancelled = false;
+    verifyEmail(token)
+      .then(() => { if (!cancelled) { setStatus("Email verified. You can sign in now."); setDone(true); } })
+      .catch((reason: unknown) => { if (!cancelled) setStatus(reason instanceof Error ? reason.message : "The verification link is invalid or expired."); });
+    return () => { cancelled = true; };
+  }, [token]);
+  return (
+    <div className="auth-layout">
+      <section className="auth-story"><a className="brand" href="/login"><BrandMark /><span>himitsu</span></a><div><span className="kicker">VERIFIED, THEN TRUSTED</span><blockquote>Ownership of the address is the first credential.</blockquote></div></section>
+      <main className="auth-panel">
+        <div className="auth-card">
+          <span className="kicker">Email verification</span>
+          <h1>{done ? "You’re verified." : "One moment."}</h1>
+          <p role="status">{status}</p>
+          <div className="auth-links"><a href="/login">{done ? "Continue to sign in →" : "← Back to sign in"}</a></div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function ResetConfirmPage(): ReactNode {
+  const [searchParams] = useSearchParams();
+  const token = searchParams.get("token") ?? "";
+  const passwordId = useId();
+  const confirmId = useId();
+  const [status, setStatus] = useState<{ kind: "idle" | "busy" | "success" | "error"; message?: string }>(
+    token === "" ? { kind: "error", message: "This recovery link is incomplete. Open the full link from your email." } : { kind: "idle" },
+  );
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const password = String(form.get("password") ?? "");
+    if (password.length < 12) { setStatus({ kind: "error", message: "Password must be at least 12 characters." }); return; }
+    if (password !== String(form.get("confirmPassword") ?? "")) { setStatus({ kind: "error", message: "Passwords do not match." }); return; }
+    setStatus({ kind: "busy" });
+    try {
+      await confirmPasswordReset(token, password);
+      setStatus({ kind: "success", message: "Password updated. Sign in with your new password." });
+    } catch (reason) {
+      setStatus({ kind: "error", message: reason instanceof Error ? reason.message : "The recovery link is invalid or expired." });
+    }
+  };
+  return (
+    <div className="auth-layout">
+      <section className="auth-story"><a className="brand" href="/login"><BrandMark /><span>himitsu</span></a><div><span className="kicker">ACCOUNT RECOVERY</span><blockquote>A single-use link, a fresh credential, and every old session revoked.</blockquote></div></section>
+      <main className="auth-panel">
+        <form className="auth-card" onSubmit={(event) => void submit(event)} noValidate>
+          <span className="kicker">Set a new password</span>
+          <h1>Choose carefully.</h1>
+          <p>Resetting your password signs out every existing session for this account.</p>
+          <label htmlFor={passwordId}>New password<input id={passwordId} name="password" type="password" autoComplete="new-password" required minLength={12} placeholder="At least 12 characters" /></label>
+          <label htmlFor={confirmId}>Confirm password<input id={confirmId} name="confirmPassword" type="password" autoComplete="new-password" required minLength={12} /></label>
+          {status.message ? <p className={`form-status ${status.kind}`} role={status.kind === "error" ? "alert" : "status"}>{status.message}</p> : null}
+          <button className="auth-submit" type="submit" disabled={status.kind === "busy" || token === "" || status.kind === "success"}>{status.kind === "busy" ? "Working…" : "Update password"}<span>→</span></button>
+          <div className="auth-links"><a href="/login">← Back to sign in</a></div>
+        </form>
+      </main>
+    </div>
+  );
+}
+
 function InvitePage(): ReactNode {
   const { token = "" } = useParams();
   const [status, setStatus] = useState("Your invitation is ready to accept.");
+  const [needsLogin, setNeedsLogin] = useState(false);
   const accept = async () => {
-    try { await postJson(`/api/v1/invitations/${encodeURIComponent(token)}/accept`, {}); setStatus("Invitation accepted. Opening your workspace…"); }
-    catch (error) { setStatus(error instanceof Error ? error.message : "Invitation could not be accepted."); }
+    try {
+      await acceptInvitation(token);
+      setStatus("Invitation accepted. Opening your workspace…");
+      window.location.assign("/app/projects");
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 401) {
+        setNeedsLogin(true);
+        setStatus("Sign in (or create an account) first, then reopen this invitation link.");
+        return;
+      }
+      setStatus(error instanceof Error ? error.message : "Invitation could not be accepted.");
+    }
   };
-  return <div className="auth-layout invite-layout"><section className="auth-story"><a className="brand" href="/login"><BrandMark /><span>himitsu</span></a><div><span className="kicker">PRIVATE BY INVITATION</span><blockquote>Join the workspace without moving trust outside its boundary.</blockquote></div></section><main className="auth-panel"><div className="auth-card"><span className="kicker">Organization invite</span><h1>You’re invited.</h1><p role="status">{status}</p><button className="auth-submit" type="button" onClick={() => void accept()}>Accept invitation <span>→</span></button><div className="auth-links"><a href="/login">Use a different account</a></div></div></main></div>;
+  return <div className="auth-layout invite-layout"><section className="auth-story"><a className="brand" href="/login"><BrandMark /><span>himitsu</span></a><div><span className="kicker">PRIVATE BY INVITATION</span><blockquote>Join the workspace without moving trust outside its boundary.</blockquote></div></section><main className="auth-panel"><div className="auth-card"><span className="kicker">Organization invite</span><h1>You’re invited.</h1><p role="status">{status}</p><button className="auth-submit" type="button" onClick={() => void accept()}>Accept invitation <span>→</span></button><div className="auth-links">{needsLogin ? <a href="/login">Sign in →</a> : <a href="/login">Use a different account</a>}</div></div></main></div>;
 }
 
 function ThemeToggle(): ReactNode {
@@ -449,7 +735,10 @@ function ThemeToggle(): ReactNode {
 }
 
 function BrandMark(): ReactNode { return <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>; }
-function initials(name: string): string { return name.split(/\s+/).map((part) => part[0]).filter(Boolean).slice(0, 2).join("").toUpperCase(); }
+function initials(email: string): string {
+  const local = email.split("@")[0] ?? "";
+  return local.split(/[._-]+/).map((part) => part[0]).filter(Boolean).slice(0, 2).join("").toUpperCase() || "U";
+}
 
 type IconName = "grid" | "pulse" | "sliders" | "search" | "sun" | "moon";
 function Icon({ name }: { name: IconName }): ReactNode {

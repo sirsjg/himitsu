@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { apiFetch } from "./session.js";
 
 export interface EnvironmentView {
   readonly id: string;
@@ -261,59 +262,7 @@ export function createSecretClient(request: RequestFunction = (input, init) => f
   };
 }
 
-const browserSecretClient = createSecretClient();
-
-export const demoEnvironments: readonly EnvironmentView[] = [
-  { id: "development", name: "Development", slug: "development", protected: false },
-  { id: "staging", name: "Staging", slug: "staging", protected: false },
-  { id: "production", name: "Production", slug: "production", protected: true },
-];
-
-export const demoSecretRows: readonly SecretView[] = [
-  { id: "0d125db6-1017-4d6e-aa37-e201b8d6ac50", environmentId: "development", key: "DATABASE_URL", notes: "Primary application database", currentVersion: 7, updatedAt: "2026-07-22T02:14:00.000Z", tags: ["database", "critical"] },
-  { id: "a37fe76d-2784-4514-846e-b0a8c06d8f59", environmentId: "development", key: "STRIPE_SECRET_KEY", notes: "Billing service credential", currentVersion: 3, updatedAt: "2026-07-21T08:40:00.000Z", tags: ["third-party"] },
-  { id: "5b62f475-cda7-40d7-8977-4091d65cf759", environmentId: "development", key: "REDIS_URL", notes: "Shared cache", currentVersion: 2, updatedAt: "2026-07-20T11:02:00.000Z", tags: ["database"] },
-  { id: "02d00455-ee4e-408d-aec0-66e3fb6a8538", environmentId: "development", key: "SENTRY_DSN", notes: null, currentVersion: 1, updatedAt: "2026-07-18T01:20:00.000Z", tags: ["observability", "third-party"] },
-  { id: "cc90e201-4078-41d6-bc53-c295f47cc79b", environmentId: "staging", key: "DATABASE_URL", notes: "Staging database", currentVersion: 5, updatedAt: "2026-07-21T03:10:00.000Z", tags: ["database", "critical"] },
-  { id: "e25be465-45ca-4ca9-b1f8-d80186bc2cea", environmentId: "production", key: "DATABASE_URL", notes: "Production database", currentVersion: 11, updatedAt: "2026-07-22T01:05:00.000Z", tags: ["database", "critical"] },
-];
-
-export const demoConsistencyReport: ConsistencyReportView = {
-  computedAt: "2026-07-22T00:00:00.000Z",
-  cached: true,
-  environments: demoEnvironments.map(({ id, slug }) => ({ id, slug })),
-  matrix: ["DATABASE_URL", "STRIPE_SECRET_KEY", "REDIS_URL", "SENTRY_DSN"].map((key) => ({
-    key,
-    keys: [key],
-    cells: demoEnvironments.map(({ id }) => {
-      const secret = demoSecretRows.find((candidate) => candidate.environmentId === id && candidate.key === key);
-      return { environmentId: id, state: secret === undefined ? "missing" as const : "present" as const, secretId: secret?.id ?? null };
-    }),
-  })),
-  findings: [
-    { id: "missing-stripe", type: "missing_key", severity: "error", key: "STRIPE_SECRET_KEY", keys: ["STRIPE_SECRET_KEY"], environmentIds: ["development"], missingEnvironmentIds: ["staging", "production"], disposition: null },
-    { id: "missing-redis", type: "missing_key", severity: "error", key: "REDIS_URL", keys: ["REDIS_URL"], environmentIds: ["development"], missingEnvironmentIds: ["staging", "production"], disposition: null },
-    { id: "missing-sentry", type: "missing_key", severity: "error", key: "SENTRY_DSN", keys: ["SENTRY_DSN"], environmentIds: ["development"], missingEnvironmentIds: ["staging", "production"], disposition: null },
-  ],
-  summary: { healthy: false, exitCode: 1, totalFindings: 3, activeFindings: 3, errors: 3, warnings: 0 },
-};
-
-function demoPromotionPreviews(sourceEnvironmentId: string): Readonly<Record<string, SecretPromotionPreviewView>> {
-  return Object.fromEntries(demoEnvironments.filter(({ id }) => id !== sourceEnvironmentId).map((target) => {
-    const source = demoSecretRows.filter(({ environmentId }) => environmentId === sourceEnvironmentId);
-    const destination = new Map(demoSecretRows.filter(({ environmentId }) => environmentId === target.id).map((secret) => [secret.key, secret]));
-    const items = source.map((secret) => {
-      const existing = destination.get(secret.key);
-      return { key: secret.key, action: existing === undefined ? "create" as const : "overwrite" as const, changed: true, sourceVersion: secret.currentVersion, targetVersion: existing?.currentVersion ?? null };
-    });
-    return [target.id, {
-      sourceEnvironmentId,
-      targetEnvironmentId: target.id,
-      items,
-      summary: { selected: items.length, created: items.filter(({ action }) => action === "create").length, overwritten: items.filter(({ action }) => action === "overwrite").length },
-    }];
-  }));
-}
+const browserSecretClient = createSecretClient(apiFetch);
 
 function metadataToView(metadata: ApiSecretMetadata): SecretView {
   return { ...metadata, tags: metadata.tags.map(({ name }) => name) };
@@ -322,35 +271,35 @@ function metadataToView(metadata: ApiSecretMetadata): SecretView {
 export function SecretWorkspace({
   projectId,
   projectName,
-  environments = demoEnvironments,
-  initialSecrets = demoSecretRows,
+  environments,
+  initialSecrets = [],
+  initialHealth = null,
+  initialPromotionPreviews = {},
   client = browserSecretClient,
 }: {
   projectId: string;
   projectName: string;
-  environments?: readonly EnvironmentView[];
+  environments: readonly EnvironmentView[];
   initialSecrets?: readonly SecretView[];
+  initialHealth?: ConsistencyReportView | null;
+  initialPromotionPreviews?: Readonly<Record<string, SecretPromotionPreviewView>>;
   client?: SecretClient;
 }): ReactNode {
   const [activeEnvironmentId, setActiveEnvironmentId] = useState(environments[0]?.id ?? "");
   const [secrets, setSecrets] = useState<readonly SecretView[]>(initialSecrets);
   const [query, setQuery] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
-  const [availableTags, setAvailableTags] = useState<readonly TagView[]>(() => projectId.startsWith("project-")
-    ? [...new Set(initialSecrets.flatMap(({ tags }) => tags))].sort().map((name) => ({ id: name, name, color: "#6B7280" }))
-    : []);
+  const [availableTags, setAvailableTags] = useState<readonly TagView[]>([]);
   const [editor, setEditor] = useState<{ mode: "add" | "edit"; secret?: SecretView; initialKey?: string } | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [historySecret, setHistorySecret] = useState<SecretView | null>(null);
   const [revealed, setRevealed] = useState<Readonly<Record<string, string>>>({});
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
-  const [health, setHealth] = useState<ConsistencyReportView | null>(projectId.startsWith("project-") ? demoConsistencyReport : null);
+  const [health, setHealth] = useState<ConsistencyReportView | null>(initialHealth);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [diffSourceEnvironmentId, setDiffSourceEnvironmentId] = useState(environments[0]?.id ?? "");
-  const [promotionPreviews, setPromotionPreviews] = useState<Readonly<Record<string, SecretPromotionPreviewView>>>(
-    projectId.startsWith("project-") ? demoPromotionPreviews(environments[0]?.id ?? "") : {},
-  );
+  const [promotionPreviews, setPromotionPreviews] = useState<Readonly<Record<string, SecretPromotionPreviewView>>>(initialPromotionPreviews);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [promotion, setPromotion] = useState<{ sourceEnvironmentId: string; targetEnvironmentId: string; keys?: readonly string[] } | null>(null);
   const remaskTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -363,17 +312,11 @@ export function SecretWorkspace({
   );
 
   const refreshHealth = async () => {
-    if (projectId.startsWith("project-")) return;
     try { setHealth(await client.consistency(projectId)); setHealthError(null); }
     catch (reason) { setHealthError(reason instanceof Error ? reason.message : "Project health could not be loaded."); }
   };
 
   const refreshDiff = async (sourceEnvironmentId = diffSourceEnvironmentId) => {
-    if (projectId.startsWith("project-")) {
-      setPromotionPreviews(demoPromotionPreviews(sourceEnvironmentId));
-      setDiffError(null);
-      return;
-    }
     const targets = environments.filter(({ id }) => id !== sourceEnvironmentId);
     const results = await Promise.allSettled(targets.map((target) => client.previewPromotion(
       projectId, target.id, sourceEnvironmentId,
@@ -393,11 +336,27 @@ export function SecretWorkspace({
   useEffect(() => { void refreshHealth(); void refreshDiff(diffSourceEnvironmentId); }, [client, projectId, diffSourceEnvironmentId]);
 
   useEffect(() => {
-    if (projectId.startsWith("project-")) return;
     void client.listTags().then(setAvailableTags).catch((reason) => {
       setNotice({ kind: "error", message: reason instanceof Error ? reason.message : "Tags could not be loaded." });
     });
   }, [client, projectId]);
+
+  useEffect(() => {
+    if (activeEnvironmentId === "") return;
+    let cancelled = false;
+    client.list(projectId, activeEnvironmentId)
+      .then((rows) => {
+        if (cancelled) return;
+        setSecrets((current) => [
+          ...current.filter(({ environmentId }) => environmentId !== activeEnvironmentId),
+          ...rows.map(metadataToView),
+        ]);
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) setNotice({ kind: "error", message: reason instanceof Error ? reason.message : "Secrets could not be loaded." });
+      });
+    return () => { cancelled = true; };
+  }, [client, projectId, activeEnvironmentId]);
 
   useEffect(() => () => {
     for (const timer of remaskTimers.current.values()) clearTimeout(timer);
@@ -560,7 +519,7 @@ export function SecretWorkspace({
         previews={promotionPreviews}
         onFix={fixHealthCell}
         onRefresh={() => { void refreshHealth(); void refreshDiff(); }}
-        onSourceChange={(sourceEnvironmentId) => { setDiffSourceEnvironmentId(sourceEnvironmentId); setPromotionPreviews(projectId.startsWith("project-") ? demoPromotionPreviews(sourceEnvironmentId) : {}); setPromotion(null); }}
+        onSourceChange={(sourceEnvironmentId) => { setDiffSourceEnvironmentId(sourceEnvironmentId); setPromotionPreviews({}); setPromotion(null); }}
         onPromote={(targetEnvironmentId, keys) => setPromotion({ sourceEnvironmentId: diffSourceEnvironmentId, targetEnvironmentId, ...(keys === undefined ? {} : { keys }) })}
       />
       <nav className="environment-tabs" aria-label="Project environments">

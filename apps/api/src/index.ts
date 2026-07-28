@@ -1,7 +1,16 @@
 import swagger from "@fastify/swagger";
 import { ApiKeyError, type ApiKeyPrincipal, type ApiKeyService } from "@himitsu/api-keys";
 import { AuditError, type AuditEventFilters, type TransactionalAuditLog } from "@himitsu/audit";
-import { AuthError, sessionCookie, type AuthService } from "@himitsu/auth";
+import {
+  AuthError,
+  clearSessionCookieHeaders,
+  secureCookieProfile,
+  sessionCookie,
+  sessionCookieHeaders,
+  type AuthService,
+  type AuthenticatedSession,
+  type CookieProfile,
+} from "@himitsu/auth";
 import {
   AuthorizationContextResolver,
   AuthorizationError,
@@ -59,6 +68,8 @@ export interface ApiDependencies {
   readonly rateLimits?: ApiRateLimitOptions;
   readonly readiness?: () => Promise<void>;
   readonly logger?: boolean;
+  /** Cookie attributes for browser sessions; defaults to strict __Host-/Secure cookies. */
+  readonly cookies?: CookieProfile;
 }
 
 export class ApiError extends Error {
@@ -354,6 +365,26 @@ const organizationSchema = {
     createdAt: dateTime, updatedAt: dateTime,
   },
 } as const;
+const organizationOptionSchema = {
+  type: "object", additionalProperties: false, required: ["id", "name", "slug", "role", "active"],
+  properties: {
+    id: uuid, name: { type: "string" }, slug: { type: "string" },
+    role: { type: "string", enum: ["owner", "admin", "member", "read_only"] }, active: { type: "boolean" },
+  },
+} as const;
+const sessionSchema = {
+  type: "object", additionalProperties: false,
+  required: ["user", "organizations", "activeOrgId", "expiresAt"],
+  properties: {
+    user: { type: "object", additionalProperties: false, required: ["id", "email"], properties: { id: uuid, email: { type: "string" } } },
+    organizations: { type: "array", items: organizationOptionSchema },
+    activeOrgId: nullableUuid,
+    expiresAt: dateTime,
+  },
+} as const;
+const authEmailField = { type: "string", format: "email", maxLength: 320 } as const;
+const authPasswordField = { type: "string", minLength: 12, maxLength: 1024 } as const;
+const authTokenField = { type: "string", minLength: 1, maxLength: 512 } as const;
 const memberSchema = {
   type: "object", additionalProperties: false,
   required: ["userId", "email", "role", "status", "createdAt", "updatedAt"],
@@ -595,6 +626,23 @@ function applyRateLimitHeaders(reply: FastifyReply, decision: RateLimitDecision)
   }
 }
 
+// Routes that run before an org-scoped session exists (or with none at all) authenticate
+// inside their handlers instead of the global hook, which requires an active organization.
+const selfAuthenticatedPaths: ReadonlySet<string> = new Set([
+  "/api/v1/cli/login",
+  "/api/v1/auth/signup",
+  "/api/v1/auth/login",
+  "/api/v1/auth/logout",
+  "/api/v1/auth/verify-email",
+  "/api/v1/auth/resend-verification",
+  "/api/v1/auth/password-reset",
+  "/api/v1/auth/password-reset/confirm",
+  "/api/v1/session",
+  "/api/v1/session/organization",
+  "/api/v1/organizations",
+  "/api/v1/invitations/accept",
+]);
+
 function cookieValue(header: string | undefined, name: string): string | null {
   if (header === undefined) return null;
   for (const pair of header.split(";")) {
@@ -622,12 +670,19 @@ function isUnsafeMethod(method: string): boolean {
   return !(["GET", "HEAD", "OPTIONS"] as const).includes(method as "GET" | "HEAD" | "OPTIONS");
 }
 
+function sessionTokenFromRequest(dependencies: ApiDependencies, request: FastifyRequest): string | null {
+  const profile = dependencies.cookies ?? secureCookieProfile;
+  const token = cookieValue(request.headers.cookie, profile.sessionName);
+  if (token !== null || profile.sessionName === sessionCookie.name) return token;
+  return cookieValue(request.headers.cookie, sessionCookie.name);
+}
+
 async function authenticateRequest(
   dependencies: ApiDependencies,
   request: FastifyRequest,
 ): Promise<ApiRequestContext> {
   const authorization = headerValue(request.headers.authorization);
-  const sessionToken = cookieValue(request.headers.cookie, sessionCookie.name);
+  const sessionToken = sessionTokenFromRequest(dependencies, request);
   if (authorization !== undefined && sessionToken !== null) {
     throw new ApiError(401, "UNAUTHENTICATED", "Use either a session or bearer credential, not both");
   }
@@ -680,6 +735,35 @@ async function authenticateRequest(
     }
     throw error;
   }
+}
+
+async function sessionFromRequest(
+  dependencies: ApiDependencies,
+  request: FastifyRequest,
+  options: { readonly csrf: boolean },
+): Promise<AuthenticatedSession> {
+  const sessionToken = sessionTokenFromRequest(dependencies, request);
+  if (sessionToken === null) throw new ApiError(401, "UNAUTHENTICATED", "Authentication is required");
+  const session = await dependencies.auth.authenticate(sessionToken);
+  if (options.csrf) {
+    const csrf = headerValue(request.headers["x-csrf-token"]);
+    if (csrf === undefined) throw new AuthError("INVALID_CSRF", "CSRF token is required");
+    dependencies.auth.verifyCsrf(session, csrf);
+  }
+  return session;
+}
+
+async function sessionPayload(
+  dependencies: ApiDependencies,
+  session: Pick<AuthenticatedSession, "userId" | "email" | "activeOrgId" | "expiresAt">,
+): Promise<Record<string, unknown>> {
+  const organizations = await dependencies.database.listOrganizationOptions(session.userId, session.activeOrgId);
+  return {
+    user: { id: session.userId, email: session.email },
+    organizations,
+    activeOrgId: session.activeOrgId,
+    expiresAt: session.expiresAt.toISOString(),
+  };
 }
 
 function responseEnvelope(data: unknown, paged = false): Record<string, unknown> {
@@ -763,7 +847,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
   app.addHook("onRequest", async (request, reply) => {
     if (["/api/v1/openapi.json", "/health/live", "/health/ready", "/metrics"].includes(routePath(request))) return;
     applyRateLimitHeaders(reply, rateLimiter.consume("ip", request.ip));
-    if (routePath(request) === "/api/v1/cli/login") return;
+    if (selfAuthenticatedPaths.has(routePath(request))) return;
     const context = await authenticateRequest(dependencies, request);
     if (context.apiKey !== null) {
       applyRateLimitHeaders(reply, rateLimiter.consume("api_key", context.apiKey.apiKeyId));
@@ -819,6 +903,8 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
       response: { 200: { type: "object", additionalProperties: true } },
     },
   }, async () => app.swagger());
+
+  registerBrowserAuthRoutes(app, dependencies);
 
   app.post("/api/v1/cli/login", {
     schema: {
@@ -1036,6 +1122,201 @@ function validateMemberChange(actorRole: OrganizationRole, target: MemberRow, de
     throw new ApiError(403, "FORBIDDEN", "Administrators cannot manage other administrators or owners");
   }
   if (desiredRole === "owner") throw new ApiError(400, "OWNER_TRANSFER_REQUIRED", "Owner transfer requires a dedicated ownership workflow");
+}
+
+function registerBrowserAuthRoutes(app: FastifyInstance, dependencies: ApiDependencies): void {
+  const csrfHeaderValue = (request: FastifyRequest): string => {
+    const csrf = headerValue(request.headers["x-csrf-token"]);
+    if (csrf === undefined) throw new AuthError("INVALID_CSRF", "CSRF token is required");
+    return csrf;
+  };
+
+  app.post("/api/v1/auth/signup", {
+    schema: {
+      operationId: "signup", tags: ["auth"],
+      body: {
+        type: "object", additionalProperties: false, required: ["email", "password"],
+        properties: { email: authEmailField, password: authPasswordField },
+      },
+      response: apiResponses({
+        type: "object", additionalProperties: false, required: ["userId"], properties: { userId: uuid },
+      }),
+    },
+  }, async (request, reply) => {
+    const input = request.body as { email: string; password: string };
+    const { userId } = await dependencies.auth.signup(input.email, input.password);
+    return reply.status(201).send({ data: { userId } });
+  });
+
+  app.post("/api/v1/auth/verify-email", {
+    schema: {
+      operationId: "verifyEmail", tags: ["auth"],
+      body: { type: "object", additionalProperties: false, required: ["token"], properties: { token: authTokenField } },
+      response: apiResponses({
+        type: "object", additionalProperties: false, required: ["verified"], properties: { verified: { type: "boolean" } },
+      }),
+    },
+  }, async (request) => {
+    await dependencies.auth.verifyEmail((request.body as { token: string }).token);
+    return { data: { verified: true } };
+  });
+
+  app.post("/api/v1/auth/resend-verification", {
+    schema: {
+      operationId: "resendVerification", tags: ["auth"],
+      body: { type: "object", additionalProperties: false, required: ["email"], properties: { email: authEmailField } },
+      response: apiResponses({
+        type: "object", additionalProperties: false, required: ["requested"], properties: { requested: { type: "boolean" } },
+      }),
+    },
+  }, async (request, reply) => {
+    await dependencies.auth.resendEmailVerification((request.body as { email: string }).email);
+    return reply.status(202).send({ data: { requested: true } });
+  });
+
+  app.post("/api/v1/auth/login", {
+    schema: {
+      operationId: "login", tags: ["auth"],
+      body: {
+        type: "object", additionalProperties: false, required: ["email", "password"],
+        properties: { email: authEmailField, password: { type: "string", minLength: 1, maxLength: 1024 }, orgId: uuid },
+      },
+      response: apiResponses(sessionSchema),
+    },
+  }, async (request, reply) => {
+    const input = request.body as { email: string; password: string; orgId?: string };
+    const credentials = await dependencies.auth.login(input.email, input.password, clientDetails(request));
+    const session = await dependencies.auth.authenticate(credentials.sessionToken);
+    const organizations = await dependencies.database.listOrganizationOptions(credentials.user.id, null);
+    const selectedOrgId = input.orgId ?? (organizations.length === 1 ? organizations[0]?.id : undefined);
+    if (selectedOrgId !== undefined) {
+      if (!organizations.some(({ id }) => id === selectedOrgId)) throw new ApiError(403, "MEMBERSHIP_REQUIRED", "Active organization membership is required");
+      await dependencies.database.switchActiveOrganization(session.sessionId, credentials.user.id, selectedOrgId);
+    }
+    void reply.header("set-cookie", sessionCookieHeaders(credentials, dependencies.cookies));
+    return { data: {
+      user: credentials.user,
+      organizations: organizations.map((organization) => ({ ...organization, active: organization.id === selectedOrgId })),
+      activeOrgId: selectedOrgId ?? null,
+      expiresAt: credentials.expiresAt.toISOString(),
+    } };
+  });
+
+  app.post("/api/v1/auth/logout", {
+    schema: {
+      operationId: "logout", tags: ["auth"],
+      response: apiResponses({
+        type: "object", additionalProperties: false, required: ["loggedOut"], properties: { loggedOut: { type: "boolean" } },
+      }),
+    },
+  }, async (request, reply) => {
+    const sessionToken = sessionTokenFromRequest(dependencies, request);
+    if (sessionToken !== null) {
+      try {
+        await dependencies.auth.logout(sessionToken, csrfHeaderValue(request));
+      } catch (error) {
+        // An expired or already-revoked session still logs out; CSRF failures do not.
+        if (!(error instanceof AuthError) || error.code === "INVALID_CSRF") throw error;
+      }
+    }
+    void reply.header("set-cookie", clearSessionCookieHeaders(dependencies.cookies));
+    return { data: { loggedOut: true } };
+  });
+
+  app.post("/api/v1/auth/password-reset", {
+    schema: {
+      operationId: "requestPasswordReset", tags: ["auth"],
+      body: { type: "object", additionalProperties: false, required: ["email"], properties: { email: authEmailField } },
+      response: apiResponses({
+        type: "object", additionalProperties: false, required: ["requested"], properties: { requested: { type: "boolean" } },
+      }),
+    },
+  }, async (request, reply) => {
+    await dependencies.auth.requestPasswordReset((request.body as { email: string }).email);
+    return reply.status(202).send({ data: { requested: true } });
+  });
+
+  app.post("/api/v1/auth/password-reset/confirm", {
+    schema: {
+      operationId: "confirmPasswordReset", tags: ["auth"],
+      body: {
+        type: "object", additionalProperties: false, required: ["token", "password"],
+        properties: { token: authTokenField, password: authPasswordField },
+      },
+      response: apiResponses({
+        type: "object", additionalProperties: false, required: ["reset"], properties: { reset: { type: "boolean" } },
+      }),
+    },
+  }, async (request) => {
+    const input = request.body as { token: string; password: string };
+    await dependencies.auth.resetPassword(input.token, input.password);
+    return { data: { reset: true } };
+  });
+
+  app.get("/api/v1/session", {
+    schema: { operationId: "getSession", tags: ["auth"], response: apiResponses(sessionSchema) },
+  }, async (request) => {
+    const session = await sessionFromRequest(dependencies, request, { csrf: false });
+    return { data: await sessionPayload(dependencies, session) };
+  });
+
+  app.post("/api/v1/session/organization", {
+    schema: {
+      operationId: "switchOrganization", tags: ["auth"],
+      body: { type: "object", additionalProperties: false, required: ["orgId"], properties: { orgId: uuid } },
+      response: apiResponses(sessionSchema),
+    },
+  }, async (request) => {
+    const session = await sessionFromRequest(dependencies, request, { csrf: true });
+    const orgId = (request.body as { orgId: string }).orgId;
+    await dependencies.database.switchActiveOrganization(session.sessionId, session.userId, orgId);
+    return { data: await sessionPayload(dependencies, { ...session, activeOrgId: orgId }) };
+  });
+
+  app.post("/api/v1/organizations", {
+    schema: {
+      operationId: "createOrganization", tags: ["organization"],
+      body: {
+        type: "object", additionalProperties: false, required: ["name", "slug"],
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 120 },
+          slug: { type: "string", minLength: 1, maxLength: 80, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        },
+      },
+      response: apiResponses({
+        type: "object", additionalProperties: false, required: ["organization", "session"],
+        properties: {
+          organization: {
+            type: "object", additionalProperties: false, required: ["id", "name", "slug"],
+            properties: { id: uuid, name: { type: "string" }, slug: { type: "string" } },
+          },
+          session: sessionSchema,
+        },
+      }),
+    },
+  }, async (request, reply) => {
+    const session = await sessionFromRequest(dependencies, request, { csrf: true });
+    const input = request.body as { name: string; slug: string };
+    const organization = await dependencies.tenancy.createOrganization(session.userId, input.name.trim(), input.slug);
+    await dependencies.database.switchActiveOrganization(session.sessionId, session.userId, organization.id);
+    return reply.status(201).send({ data: {
+      organization,
+      session: await sessionPayload(dependencies, { ...session, activeOrgId: organization.id }),
+    } });
+  });
+
+  app.post("/api/v1/invitations/accept", {
+    schema: {
+      operationId: "acceptInvitation", tags: ["members"],
+      body: { type: "object", additionalProperties: false, required: ["token"], properties: { token: authTokenField } },
+      response: apiResponses(sessionSchema),
+    },
+  }, async (request) => {
+    const session = await sessionFromRequest(dependencies, request, { csrf: true });
+    const orgId = await dependencies.tenancy.acceptInvitation((request.body as { token: string }).token, session.userId, session.email);
+    await dependencies.database.switchActiveOrganization(session.sessionId, session.userId, orgId);
+    return { data: await sessionPayload(dependencies, { ...session, activeOrgId: orgId }) };
+  });
 }
 
 function registerOrganizationRoutes(
@@ -2045,6 +2326,11 @@ function mapError(error: unknown): ApiError {
   if (error instanceof AuthError) {
     if (error.code === "INVALID_CSRF") return new ApiError(403, "INVALID_CSRF", "CSRF validation failed");
     if (error.code === "RATE_LIMITED") return new ApiError(429, "RATE_LIMITED", "Too many authentication attempts");
+    if (error.code === "EMAIL_EXISTS") return new ApiError(409, "EMAIL_EXISTS", error.message);
+    if (error.code === "INVALID_INPUT") return new ApiError(400, "INVALID_INPUT", error.message);
+    if (error.code === "INVALID_TOKEN") return new ApiError(400, "INVALID_TOKEN", error.message);
+    if (error.code === "EMAIL_NOT_VERIFIED") return new ApiError(403, "EMAIL_NOT_VERIFIED", error.message);
+    if (error.code === "INVALID_CREDENTIALS") return new ApiError(401, "INVALID_CREDENTIALS", error.message);
     return new ApiError(401, "UNAUTHENTICATED", "Session is invalid or expired");
   }
   if (error instanceof ProjectError || error instanceof EnvironmentError || error instanceof SecretError || error instanceof ConsistencyError || error instanceof AuditError) {
