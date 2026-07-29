@@ -21,6 +21,7 @@ import {
 import { SecretWorkspace, type EnvironmentView } from "./SecretWorkspace.js";
 import { AuditPage } from "./AuditPage.js";
 import { SettingsPage } from "./SettingsPage.js";
+import { BUILD_LABEL } from "./version.js";
 import {
   ApiRequestError,
   acceptInvitation,
@@ -371,7 +372,9 @@ function AppShell({ session, onSession, projects, projectsError, addProject }: {
         </nav>
         <div className="sidebar-foot">
           <span className="status-dot" />
-          <span>Systems normal</span>
+          {/* The build label nests inside the last span so the existing
+              .sidebar-collapsed rule hides it along with the status text. */}
+          <span>Systems normal<small className="build-tag" title="Deployed build">{BUILD_LABEL}</small></span>
         </div>
       </aside>
       <div className="workspace">
@@ -639,7 +642,7 @@ function AuthPage({ mode }: { mode: AuthMode }): ReactNode {
 
   return (
     <div className="auth-layout">
-      <section className="auth-story"><a className="brand" href="/login"><BrandMark /><span>himitsu</span></a><div><span className="kicker">SECRETS, WITHOUT THE SPRAWL</span><blockquote>“The quietest part of your infrastructure should be the part you trust most.”</blockquote></div><footer><span>ENCRYPTED BY DEFAULT</span><span>AUDITED BY DESIGN</span></footer></section>
+      <section className="auth-story"><a className="brand" href="/login"><BrandMark /><span>himitsu</span></a><div><span className="kicker">SECRETS, WITHOUT THE SPRAWL</span><blockquote>“The quietest part of your infrastructure should be the part you trust most.”</blockquote></div><footer><span>ENCRYPTED BY DEFAULT</span><span>AUDITED BY DESIGN</span><span title="Deployed build">{BUILD_LABEL}</span></footer></section>
       <main className="auth-panel">
         <ThemeToggle />
         <form className="auth-card" onSubmit={submit} noValidate>

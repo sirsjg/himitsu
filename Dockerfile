@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1.7
 FROM node:22-bookworm-slim AS build
+# The release workflow passes the tag and short SHA in. There is no .git in the build
+# context, so without these the web bundle and API health stamp fall back to "dev".
+ARG HIMITSU_VERSION=dev
+ARG HIMITSU_COMMIT=unknown
+ENV HIMITSU_VERSION=${HIMITSU_VERSION} HIMITSU_COMMIT=${HIMITSU_COMMIT}
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY apps ./apps
@@ -12,7 +17,10 @@ FROM build AS production-deps
 RUN npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS api
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000
+ARG HIMITSU_VERSION=dev
+ARG HIMITSU_COMMIT=unknown
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 \
+    HIMITSU_VERSION=${HIMITSU_VERSION} HIMITSU_COMMIT=${HIMITSU_COMMIT}
 WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=production-deps /app/node_modules ./node_modules
@@ -25,11 +33,17 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 CMD ["node", "apps/api/dist/src/server.js"]
 
 FROM nginx:1.27-alpine AS web
-COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+# NGINX_ENTRYPOINT_LOCAL_RESOLVERS makes the entrypoint export NGINX_LOCAL_RESOLVERS from
+# /etc/resolv.conf; the envsubst filter admits that name alongside our own while still
+# leaving nginx's $uri, $host and $scheme untouched.
+ENV HIMITSU_API_UPSTREAM=api:3000 \
+    NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
+    NGINX_ENVSUBST_FILTER='^(HIMITSU_|NGINX_LOCAL_RESOLVERS)'
+COPY deploy/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/apps/web/dist /usr/share/nginx/html
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD ["wget", "--quiet", "--spider", "http://127.0.0.1:8080/health/live"]
+  CMD ["wget", "--quiet", "--spider", "http://127.0.0.1:8080/nginx-health"]
 
 FROM postgres:16 AS ops
 RUN apt-get update \
