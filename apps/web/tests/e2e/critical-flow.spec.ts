@@ -8,12 +8,34 @@ async function json(route: Route, data: unknown, status = 200): Promise<void> {
 
 async function installApi(page: Page): Promise<void> {
   const keys = new Set<string>();
+  const createdProjects: Array<Record<string, unknown>> = [];
   const serviceKeys: Array<Record<string, unknown>> = [];
   let nextSecret = 1;
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === "/api/v1/auth/login") return json(route, {});
+    if (path === "/api/v1/session") {
+      return json(route, {
+        user: { id: "e2e-user", email: "owner@example.com" },
+        organizations: [{ id: "org-studio", name: "Northstar Studio", slug: "northstar-studio", role: "owner", active: true }],
+        activeOrgId: "org-studio",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      });
+    }
+    if (path === "/api/v1/projects" && request.method() === "GET") {
+      return json(route, [...createdProjects]);
+    }
+    if (path.endsWith("/environments") && request.method() === "GET") {
+      return json(route, [
+        { id: "development", orgId: "org-studio", projectId: "e2e-project", name: "Development", slug: "development", displayOrder: 0, protected: false, deletedAt: null, purgeAfter: null },
+        { id: "staging", orgId: "org-studio", projectId: "e2e-project", name: "Staging", slug: "staging", displayOrder: 1, protected: false, deletedAt: null, purgeAfter: null },
+        { id: "production", orgId: "org-studio", projectId: "e2e-project", name: "Production", slug: "production", displayOrder: 2, protected: true, deletedAt: null, purgeAfter: null },
+      ]);
+    }
+    if (path.endsWith("/secrets") && request.method() === "GET") {
+      return json(route, [...keys].sort().map((key, index) => ({ id: `secret-${index + 1}`, orgId: "org-studio", projectId: "e2e-project", environmentId: "development", key, notes: null, currentVersion: 1, updatedAt: now, tagIds: [], tags: [] })));
+    }
     if (path === "/api/v1/organization") return json(route, { id: "org-studio", name: "Northstar Studio", slug: "northstar-studio", retentionDays: 90, createdAt: now, updatedAt: now });
     if (path === "/api/v1/members") return json(route, [{ userId: "e2e-user", email: "owner@example.com", role: "owner", status: "active", createdAt: now, updatedAt: now }]);
     if (path === "/api/v1/invitations") return json(route, []);
@@ -25,7 +47,9 @@ async function installApi(page: Page): Promise<void> {
       return json(route, { apiKey, token: "himi_0123456789abcdef_abcdefghijklmnopqrstuvwxyzABCDEFGH123456789" }, 201);
     }
     if (path === "/api/v1/projects" && request.method() === "POST") {
-      return json(route, { id: "e2e-project", name: "E2E Vault", slug: "e2e-vault", tags: [] }, 201);
+      const project = { id: "e2e-project", orgId: "org-studio", name: "E2E Vault", slug: "e2e-vault", description: null, settings: { defaultEnvironments: ["development", "staging", "production"] }, tagIds: [], tags: [], archivedAt: null, deletedAt: null, purgeAfter: null };
+      createdProjects.push(project);
+      return json(route, project, 201);
     }
     if (path === "/api/v1/tags" && request.method() === "GET") return json(route, []);
     if (path.endsWith("/consistency")) {
@@ -101,12 +125,25 @@ test("login, project creation, secret writes, dotenv import, diff, audit, and se
   await expect(page).toHaveURL(/\/app\/projects\/e2e-project$/);
   await expect(page.getByRole("heading", { name: "E2E Vault" })).toBeVisible();
 
+  // Moved from tests/unit.test.tsx: environment browsing and the empty-vault
+  // state render behind the environments fetch, which renderToStaticMarkup can
+  // never resolve because it does not run effects.
+  await expect(page.getByText("Project vault")).toBeVisible();
+  const environmentTabs = page.getByRole("navigation", { name: "Project environments" });
+  for (const environment of ["Development", "Staging", "Production"]) {
+    await expect(environmentTabs.getByRole("button", { name: new RegExp(environment) })).toBeVisible();
+  }
+  await expect(page.getByText("This environment is ready for its first secret")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add first secret" })).toBeVisible();
+
   await page.getByRole("button", { name: "Add secret" }).click();
   const editor = page.getByRole("form", { name: "Add secret" });
   await editor.getByLabel("Key").fill("DATABASE_URL");
   await editor.getByLabel("Value").fill("postgres://db/app");
   await editor.getByRole("button", { name: "Encrypt & save" }).click();
   await expect(page.getByText("DATABASE_URL", { exact: true }).first()).toBeVisible();
+  // The plaintext must never reach the document until explicitly revealed.
+  await expect(page.locator("body")).not.toContainText("postgres://db/app");
 
   await page.getByRole("button", { name: "Bulk paste" }).click();
   const importer = page.getByRole("dialog", { name: "Import secrets" });
@@ -122,12 +159,12 @@ test("login, project creation, secret writes, dotenv import, diff, audit, and se
   await page.getByRole("link", { name: "Audit" }).click();
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
   await expect(page.locator("code").filter({ hasText: "secret.imported" })).toBeVisible();
-  await expect(page.getByText("owner@example.com")).toBeVisible();
+  await expect(page.getByLabel("Audit events").getByText("owner@example.com")).toBeVisible();
 
   await page.getByRole("link", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Members & invitations" })).toBeVisible();
-  await expect(page.getByText("owner@example.com")).toBeVisible();
+  await expect(page.getByRole("main").getByText("owner@example.com").first()).toBeVisible();
   const keyForm = page.getByRole("form", { name: "Create API key" });
   await keyForm.getByLabel("Name").fill("E2E deploy");
   await keyForm.getByRole("button", { name: "Create key" }).click();

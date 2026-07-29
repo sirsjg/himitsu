@@ -13,19 +13,69 @@ import {
 import {
   SecretConflictError,
   createSecretClient,
-  demoSecretRows,
   filterSecretRows,
   isConventionalSecretKey,
   parseBulkSecrets,
   promotionMarker,
 } from "../src/SecretWorkspace.js";
+import type { SessionOrganization, SessionView } from "../src/session.js";
 import { createAuditClient } from "../src/AuditPage.js";
 import { createSettingsClient } from "../src/SettingsPage.js";
 
-function renderRoute(path: string): string {
+/**
+ * Stand-in for the demo rows SecretWorkspace used to export. Values are absent
+ * on purpose: filterSecretRows must match on key, notes, and tags only, and a
+ * value here would let a regression that searches plaintext pass unnoticed.
+ */
+const secretRows = [
+  {
+    id: "secret-database", environmentId: "env-production", key: "DATABASE_URL",
+    notes: "Primary database connection", currentVersion: 4,
+    updatedAt: "2026-01-01T00:00:00.000Z", tags: ["critical", "database"],
+  },
+  {
+    id: "secret-stripe", environmentId: "env-production", key: "STRIPE_SECRET_KEY",
+    notes: "Billing provider credential", currentVersion: 2,
+    updatedAt: "2026-01-02T00:00:00.000Z", tags: ["third-party"],
+  },
+] as const;
+
+/** Builds a session whose active organization carries the given role. */
+function sessionWithRole(id: string, name: string, role: SessionOrganization["role"]): SessionView {
+  return {
+    user: { id: "user-1", email: "operator@example.com" },
+    organizations: [{ id, name, slug: id, role, active: true }],
+    activeOrgId: id,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+}
+
+const demoProjects = [
+  { id: "project-atlas", name: "Atlas API", slug: "atlas-api", environments: ["development", "staging", "production"], tags: ["pci"] },
+  { id: "project-lantern", name: "Lantern Web", slug: "lantern-web", environments: ["production"], tags: [] },
+  { id: "project-relay", name: "Relay Worker", slug: "relay-worker", environments: ["production"], tags: [] },
+] as const;
+
+const ownerSession: SessionView = {
+  user: { id: "user-1", email: "operator@example.com" },
+  organizations: [{ id: "org-northstar", name: "Northstar Studio", slug: "northstar-studio", role: "owner", active: true }],
+  activeOrgId: "org-northstar",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+};
+
+/**
+ * Renders a route to static markup.
+ *
+ * Authenticated routes need an injected session and project list: AppRoutes
+ * bootstraps both from the API inside effects, which renderToStaticMarkup never
+ * runs, so without injection every /app route renders the loading splash.
+ */
+function renderRoute(path: string, authenticated = path.startsWith("/app/")): string {
   return renderToStaticMarkup(
     <MemoryRouter initialEntries={[path]}>
-      <AppRoutes />
+      {authenticated
+        ? <AppRoutes initialSession={ownerSession} initialProjects={demoProjects} />
+        : <AppRoutes />}
     </MemoryRouter>,
   );
 }
@@ -66,18 +116,16 @@ test("authenticated project route renders the shell, organization switcher, and 
   assert.match(html, /Relay Worker/);
 });
 
-test("first-run and empty-vault states lead a new organization through setup", () => {
-  const firstRun = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/projects"]}><AppRoutes projects={[]} /></MemoryRouter>);
+// The empty-vault half of this test moved to tests/e2e/critical-flow.spec.ts.
+// It asserts markup behind the project-detail environments fetch, which
+// renderToStaticMarkup can never produce because it does not run effects.
+test("first-run state leads a new organization through setup", () => {
+  const firstRun = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/projects"]}><AppRoutes initialSession={ownerSession} initialProjects={[]} /></MemoryRouter>);
   assert.match(firstRun, /First-run checklist/);
   assert.match(firstRun, /Organization ready/);
   assert.match(firstRun, /Create first project/);
   assert.match(firstRun, /Import your \.env/);
   assert.match(firstRun, /Connect CI or runtime/);
-
-  const emptyVault = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/projects/empty-project"]}><AppRoutes projects={[{ id: "empty-project", name: "Empty Vault", slug: "empty-vault", secrets: [], tags: [] }]} /></MemoryRouter>);
-  assert.match(emptyVault, /This environment is ready for its first secret/);
-  assert.match(emptyVault, /Add first secret/);
-  assert.match(emptyVault, /Import your \.env/);
 });
 
 test("project creation posts the API contract and returns a workspace-ready project", async () => {
@@ -90,7 +138,7 @@ test("project creation posts the API contract and returns a workspace-ready proj
     });
   });
   assert.deepEqual(request, { input: "/api/v1/projects", method: "POST", body: { name: "Payments API", slug: "payments-api" } });
-  assert.deepEqual(project, { id: "project-id", name: "Payments API", slug: "payments-api", secrets: [], tags: [] });
+  assert.deepEqual(project, { id: "project-id", name: "Payments API", slug: "payments-api", environments: [], tags: [] });
 
   await assert.rejects(
     () => createProject({ name: "Duplicate", slug: "payments-api" }, async () => new Response(JSON.stringify({ error: { message: "Project slug already exists" } }), { status: 409 })),
@@ -136,7 +184,7 @@ test("admin audit route renders filters, infinite history, exports, and retentio
   assert.match(html, /Append-only/);
   assert.doesNotMatch(html, /postgres:\/\/|sk_live_/);
 
-  const denied = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/audit"]}><AppRoutes organizations={[{ id: "member-org", name: "Member Org", role: "member" }]} /></MemoryRouter>);
+  const denied = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/audit"]}><AppRoutes initialSession={sessionWithRole("member-org", "Member Org", "member")} /></MemoryRouter>);
   assert.match(denied, /Administrator access required/);
   assert.doesNotMatch(denied, /Export CSV/);
 });
@@ -179,7 +227,7 @@ test("settings route exposes governed members, keys, tags, policy, and transfer 
   assert.match(html, /Atlas API/);
   assert.doesNotMatch(html, /himi_[0-9a-f]{16}_/);
 
-  const readOnly = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/settings"]}><AppRoutes organizations={[{ id: "reader-org", name: "Reader Org", role: "read_only" }]} /></MemoryRouter>);
+  const readOnly = renderToStaticMarkup(<MemoryRouter initialEntries={["/app/settings"]}><AppRoutes initialSession={sessionWithRole("reader-org", "Reader Org", "read_only")} /></MemoryRouter>);
   assert.match(readOnly, /Read-only settings view/);
   assert.doesNotMatch(readOnly, /Send invite/);
   assert.doesNotMatch(readOnly, />Create key</);
@@ -253,20 +301,20 @@ test("bulk paste parses dotenv values and reports malformed or duplicate entries
 
 test("secret search combines text terms and tag filters without examining values", () => {
   assert.deepEqual(
-    filterSecretRows(demoSecretRows, "primary database", "critical").map(({ key }) => key),
+    filterSecretRows(secretRows, "primary database", "critical").map(({ key }) => key),
     ["DATABASE_URL"],
   );
   assert.deepEqual(
-    filterSecretRows(demoSecretRows, "billing", "third-party").map(({ key }) => key),
+    filterSecretRows(secretRows, "billing", "third-party").map(({ key }) => key),
     ["STRIPE_SECRET_KEY"],
   );
-  assert.deepEqual(filterSecretRows(demoSecretRows, "plaintext-not-indexed", null), []);
+  assert.deepEqual(filterSecretRows(secretRows, "plaintext-not-indexed", null), []);
 });
 
 test("project search combines names, slugs, and organization tags", () => {
   const projects = [
-    { id: "one", name: "Payments API", slug: "payments-api", secrets: [], tags: ["pci", "database"] },
-    { id: "two", name: "Marketing Site", slug: "marketing-site", secrets: [], tags: ["public"] },
+    { id: "one", name: "Payments API", slug: "payments-api", environments: [], tags: ["pci", "database"] },
+    { id: "two", name: "Marketing Site", slug: "marketing-site", environments: [], tags: ["public"] },
   ];
   assert.deepEqual(filterProjectLinks(projects, "payments database", "pci").map(({ id }) => id), ["one"]);
   assert.deepEqual(filterProjectLinks(projects, "site", "pci"), []);
@@ -359,34 +407,10 @@ test("promotion client previews and commits selected or full environment copies"
   ]);
 });
 
-test("project detail renders environment browsing and masked secret editing controls", () => {
-  const html = renderRoute("/app/projects/project-atlas");
-
-  assert.match(html, /Project vault/);
-  assert.match(html, /Development/);
-  assert.match(html, /Staging/);
-  assert.match(html, /Production/);
-  assert.match(html, /Bulk paste/);
-  assert.match(html, />Export</);
-  assert.match(html, /Add secret/);
-  assert.match(html, /Project consistency health/);
-  assert.match(html, /Cross-environment diff/);
-  assert.match(html, /Baseline environment/);
-  assert.match(html, /Promotion target/);
-  assert.match(html, /Review full promotion/);
-  assert.match(html, /value changed/);
-  assert.match(html, />Promote</);
-  assert.match(html, /Presence and change markers only/);
-  assert.match(html, /Configuration drift/);
-  assert.match(html, /CI exit code/);
-  assert.match(html, /STRIPE_SECRET_KEY/);
-  assert.match(html, />missing</);
-  assert.match(html, /DATABASE_URL/);
-  assert.match(html, /Reveal DATABASE_URL/);
-  assert.match(html, /#database/);
-  assert.match(html, />v7</);
-  assert.doesNotMatch(html, /postgres:\/\//);
-});
+// "project detail renders environment browsing and masked secret editing
+// controls" moved to tests/e2e/critical-flow.spec.ts: every assertion in it
+// depends on the environments fetch in App.tsx, so a static render only ever
+// reaches the "Loading environments…" placeholder.
 
 test("consistency client targets the CI-friendly project report endpoint", async () => {
   const calls: string[] = [];
