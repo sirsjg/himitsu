@@ -1,0 +1,63 @@
+name: Himitsu Secrets
+description: Load secrets from a Himitsu environment into a GitHub Actions workflow.
+author: Himitsu
+branding:
+  icon: lock
+  color: purple
+
+inputs:
+  api-url:
+    description: Base URL of the Himitsu API, e.g. https://himitsu.example.com.
+    required: true
+  token:
+    description: >-
+      Himitsu API token. Use a read-only, environment-scoped key and store it as
+      a repository or environment secret.
+    required: true
+  project:
+    description: Himitsu project id (UUID).
+    required: true
+  environment:
+    description: Himitsu environment id (UUID).
+    required: true
+  export-to:
+    description: >-
+      Where to put the secrets. "env" exports them to subsequent steps (default),
+      "file" writes a rendered file, "outputs" sets step outputs, "none" fetches
+      and reports counts without exporting.
+    required: false
+    default: env
+  format:
+    description: File format when export-to is "file" — dotenv, json, or shell.
+    required: false
+    default: dotenv
+  file:
+    description: Destination path when export-to is "file". Written with mode 0600.
+    required: false
+  prefix:
+    description: Optional prefix applied to every exported name, e.g. HIMITSU_.
+    required: false
+  include:
+    description: Comma or newline separated allowlist of secret keys. Empty means all.
+    required: false
+  exclude:
+    description: Comma or newline separated denylist of secret keys.
+    required: false
+  mask:
+    description: Register every secret value for log redaction. Leave enabled.
+    required: false
+    default: "true"
+
+outputs:
+  secret-count:
+    description: Number of secrets exported.
+  config-version:
+    description: Himitsu environment config version that was read.
+  keys:
+    description: Comma separated list of exported secret keys (names only, no values).
+  file:
+    description: Path written when export-to is "file".
+
+runs:
+  using: node20
+  main: dist/index.js

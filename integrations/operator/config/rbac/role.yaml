@@ -1,0 +1,50 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: himitsu-operator
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - himitsu.io
+  resources:
+  - himitsusecrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - himitsu.io
+  resources:
+  - himitsusecrets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - himitsu.io
+  resources:
+  - himitsusecrets/status
+  verbs:
+  - get
+  - patch
+  - update

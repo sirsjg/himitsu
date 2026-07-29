@@ -1,5 +1,8 @@
 node_modules/
 dist/
+# GitHub runs a published action straight from its committed build output, so
+# this one dist directory has to be tracked.
+!integrations/github-action/dist/
 dist-test/
 coverage/
 playwright-report/
