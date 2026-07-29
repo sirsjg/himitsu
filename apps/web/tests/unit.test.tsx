@@ -8,6 +8,7 @@ import {
   createProject,
   filterCommandItems,
   filterProjectLinks,
+  suggestSlug,
   validateAuthForm,
 } from "../src/App.js";
 import {
@@ -91,6 +92,13 @@ test("command search finds navigation, projects, and secret keys using every ter
   assert.deepEqual(filterCommandItems(items, "governance").map(({ id }) => id), ["audit"]);
   assert.deepEqual(filterCommandItems(items, "atlas secret").map(({ id }) => id), ["database"]);
   assert.deepEqual(filterCommandItems(items, "missing"), []);
+});
+
+test("slug suggestions track human-readable names", () => {
+  assert.equal(suggestSlug("Payments API"), "payments-api");
+  assert.equal(suggestSlug("  Customer Portal & Billing  "), "customer-portal-billing");
+  assert.equal(suggestSlug("---"), "");
+  assert.equal(suggestSlug("A".repeat(100)).length, 80);
 });
 
 test("auth validation rejects malformed credentials and accepts each valid flow", () => {

@@ -73,6 +73,10 @@ export function filterCommandItems(items: readonly CommandItem[], query: string)
   return items.filter(({ search }) => terms.every((term) => search.includes(term)));
 }
 
+export function suggestSlug(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+}
+
 export function validateAuthForm(
   mode: AuthMode,
   values: { email: string; password?: string; confirmPassword?: string },
@@ -237,8 +241,6 @@ function OrgSetupPage({ session, onSession }: { session: SessionView; onSession:
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
-  const suggestSlug = (value: string): string =>
-    value.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
 
   const open = async (orgId: string) => {
     setBusy(true);
@@ -474,19 +476,28 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [projectName, setProjectName] = useState("");
+  const [projectSlug, setProjectSlug] = useState("");
+  const [projectSlugEdited, setProjectSlugEdited] = useState(false);
   const [query, setQuery] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const loaded = projects ?? [];
   const tags = [...new Set(loaded.flatMap((project) => project.tags))].sort();
   const environmentCount = new Set(loaded.flatMap((project) => project.environments)).size;
   const visibleProjects = useMemo(() => filterProjectLinks(loaded, query, activeTag), [loaded, query, activeTag]);
+  const openCreator = () => {
+    setProjectName("");
+    setProjectSlug("");
+    setProjectSlugEdited(false);
+    setError(null);
+    setCreating(true);
+  };
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
     setBusy(true);
     setError(null);
     try {
-      const project = await createProject({ name: String(data.get("name") ?? ""), slug: String(data.get("slug") ?? "") });
+      const project = await createProject({ name: projectName, slug: projectSlug });
       onCreated(project);
       navigate(`/app/projects/${project.id}`);
     } catch (reason) {
@@ -496,11 +507,11 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
   };
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Workspace" title="Projects" copy="Encrypted configuration, arranged around the way your systems move." action="New project" onAction={() => setCreating(true)} />
+      <PageHeader eyebrow="Workspace" title="Projects" copy="Encrypted configuration, arranged around the way your systems move." action="New project" onAction={openCreator} />
       {creating ? <form className="editor-sheet project-creator" aria-label="Create project" onSubmit={(event) => void submit(event)}>
         <header><div><span className="kicker">New encrypted workspace</span><h2>Create a project</h2></div><button type="button" aria-label="Close project form" onClick={() => setCreating(false)}>×</button></header>
-        <label>Name<input name="name" required minLength={1} maxLength={120} autoFocus placeholder="Payments API" /></label>
-        <label>Slug<input name="slug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} placeholder="payments-api" /></label>
+        <label>Name<input name="name" value={projectName} required minLength={1} maxLength={120} autoFocus placeholder="Payments API" onChange={(event) => { setProjectName(event.target.value); if (!projectSlugEdited) setProjectSlug(suggestSlug(event.target.value)); }} /></label>
+        <label>Slug<input name="slug" value={projectSlug} required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} placeholder="payments-api" onChange={(event) => { setProjectSlugEdited(true); setProjectSlug(event.target.value); }} /></label>
         {error ? <p className="form-status error" role="alert">{error}</p> : null}
         <footer><button className="secondary-button" type="button" onClick={() => setCreating(false)}>Cancel</button><button className="primary-button" type="submit" disabled={busy}>{busy ? "Creating…" : "Create project"}</button></footer>
       </form> : null}
@@ -511,7 +522,7 @@ function ProjectsPage({ projects, onCreated }: { projects: readonly ProjectQuick
         <Metric value="0" label="open alerts" />
       </section>
       {projects === undefined ? <section className="quiet-panel" aria-busy="true"><BrandMark /><h2>Loading projects…</h2><p>Fetching the encrypted workspaces in this organization.</p></section>
-        : loaded.length === 0 ? <FirstRunChecklist onCreate={() => setCreating(true)} /> : <><section className="secret-toolbar project-filters" aria-label="Filter projects"><label className="secret-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search projects</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects or tags" /></label><div className="tag-filters"><button type="button" className={activeTag === null ? "active" : ""} onClick={() => setActiveTag(null)}>All</button>{tags.map((tag) => <button type="button" key={tag} className={activeTag === tag ? "active" : ""} onClick={() => setActiveTag(tag)}>#{tag}</button>)}</div><span className="row-count">{visibleProjects.length} / {loaded.length}</span></section>
+        : loaded.length === 0 ? <FirstRunChecklist onCreate={openCreator} /> : <><section className="secret-toolbar project-filters" aria-label="Filter projects"><label className="secret-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search projects</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects or tags" /></label><div className="tag-filters"><button type="button" className={activeTag === null ? "active" : ""} onClick={() => setActiveTag(null)}>All</button>{tags.map((tag) => <button type="button" key={tag} className={activeTag === tag ? "active" : ""} onClick={() => setActiveTag(tag)}>#{tag}</button>)}</div><span className="row-count">{visibleProjects.length} / {loaded.length}</span></section>
       <section className="project-grid" aria-label="Projects">
         {visibleProjects.map((project, index) => (
           <NavLink className="project-card" to={`/app/projects/${project.id}`} key={project.id}>

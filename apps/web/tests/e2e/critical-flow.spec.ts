@@ -126,8 +126,9 @@ test("login, project creation, secret writes, dotenv import, diff, audit, and se
   await expect(page.locator(".app-frame")).not.toHaveClass(/sidebar-collapsed/);
 
   await page.getByRole("button", { name: "New project" }).click();
-  await page.getByRole("form", { name: "Create project" }).getByLabel("Name").fill("E2E Vault");
-  await page.getByRole("form", { name: "Create project" }).getByLabel("Slug").fill("e2e-vault");
+  const projectForm = page.getByRole("form", { name: "Create project" });
+  await projectForm.getByLabel("Name").fill("E2E Vault");
+  await expect(projectForm.getByLabel("Slug")).toHaveValue("e2e-vault");
   await page.getByRole("button", { name: "Create project", exact: true }).click();
   await expect(page).toHaveURL(/\/app\/projects\/e2e-project$/);
   await expect(page.getByRole("heading", { name: "E2E Vault" })).toBeVisible();
