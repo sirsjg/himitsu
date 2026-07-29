@@ -734,7 +734,11 @@ function ThemeToggle(): ReactNode {
   return <button className="icon-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}><Icon name={theme === "dark" ? "sun" : "moon"} /></button>;
 }
 
-function BrandMark(): ReactNode { return <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>; }
+function BrandMark(): ReactNode {
+  return <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path fillRule="evenodd" d="M12 2.3 19.4 5.35v6.1c0 4.6-3 8.5-7.4 10.25C7.6 19.95 4.6 16.05 4.6 11.45v-6.1ZM12 8.25a2.15 2.15 0 0 0-1.05 4.03L10.3 15.5h3.4l-.65-3.22A2.15 2.15 0 0 0 12 8.25Z" />
+  </svg>;
+}
 function initials(email: string): string {
   const local = email.split("@")[0] ?? "";
   return local.split(/[._-]+/).map((part) => part[0]).filter(Boolean).slice(0, 2).join("").toUpperCase() || "U";
