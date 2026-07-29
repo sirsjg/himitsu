@@ -168,8 +168,35 @@ test("generates an OpenAPI 3.1 contract from every v1 route", async () => {
     Object.values(methods).map(({ operationId }) => operationId).filter(Boolean),
   );
   assert.equal(new Set(operationIds).size, operationIds.length);
+
+  /**
+   * Routes that run outside tenant authorization, and so carry no entry in
+   * apiRoutePermissions: they either establish a session or act before one has
+   * an active organization.
+   *
+   * Listing them explicitly keeps the invariant below meaningful. Every other
+   * route must have a permission, because enforceRoutePermission fails closed
+   * with AUTHORIZATION_POLICY_MISSING when one is absent — so a new tenant
+   * route that forgets its policy has to fail here rather than in production.
+   */
+  const sessionScopedOperations = new Set([
+    "acceptInvitation",
+    "confirmPasswordReset",
+    "createOrganization",
+    "getSession",
+    "login",
+    "logout",
+    "requestPasswordReset",
+    "resendVerification",
+    "signup",
+    "switchOrganization",
+    "verifyEmail",
+  ]);
   assert.deepEqual(
-    new Set(operationIds.filter((operationId) => operationId !== "getOpenApi")),
+    new Set(operationIds.filter((operationId): operationId is string =>
+      operationId !== undefined
+      && operationId !== "getOpenApi"
+      && !sessionScopedOperations.has(operationId))),
     new Set(Object.keys(apiRoutePermissions)),
   );
   const projectCreate = document.paths["/api/v1/projects"]?.post as unknown as {

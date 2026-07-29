@@ -295,6 +295,12 @@ function AppShell({ session, onSession, projects, projectsError, addProject }: {
 }): ReactNode {
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const stored = localStorage.getItem("himitsu-sidebar-collapsed");
+    if (stored !== null) return stored === "true";
+    return window.matchMedia("(max-width: 980px)").matches;
+  });
   const [switchError, setSwitchError] = useState<string | null>(null);
   const organizations = session.organizations;
   const activeOrg = organizations.find(({ id }) => id === session.activeOrgId);
@@ -323,6 +329,10 @@ function AppShell({ session, onSession, projects, projectsError, addProject }: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem("himitsu-sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
   const switchOrg = async (orgId: string) => {
     setSwitchError(null);
     try {
@@ -336,12 +346,22 @@ function AppShell({ session, onSession, projects, projectsError, addProject }: {
   const context: WorkspaceContext = { role: activeOrg?.role ?? "read_only", projects, addProject };
 
   return (
-    <div className="app-frame">
+    <div className={sidebarCollapsed ? "app-frame sidebar-collapsed" : "app-frame"}>
       <aside className="sidebar">
         <NavLink className="brand" to="/app/projects" aria-label="Himitsu home">
           <BrandMark />
           <span>himitsu</span>
         </NavLink>
+        <button
+          className="sidebar-toggle"
+          type="button"
+          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!sidebarCollapsed}
+          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+        >
+          <Icon name={sidebarCollapsed ? "chevron-right" : "chevron-left"} />
+        </button>
         <nav className="primary-nav" aria-label="Primary navigation">
           <NavigationLink to="/app/projects" label="Projects" icon="grid" />
           <NavigationLink to="/app/audit" label="Audit" icon="pulse" />
@@ -744,7 +764,7 @@ function initials(email: string): string {
   return local.split(/[._-]+/).map((part) => part[0]).filter(Boolean).slice(0, 2).join("").toUpperCase() || "U";
 }
 
-type IconName = "grid" | "pulse" | "sliders" | "search" | "sun" | "moon";
+type IconName = "grid" | "pulse" | "sliders" | "search" | "sun" | "moon" | "chevron-left" | "chevron-right";
 function Icon({ name }: { name: IconName }): ReactNode {
   const paths: Record<IconName, ReactNode> = {
     grid: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>,
@@ -753,6 +773,8 @@ function Icon({ name }: { name: IconName }): ReactNode {
     search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,
     sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>,
     moon: <path d="M20 15.5A8 8 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>,
+    "chevron-left": <path d="m14 7-5 5 5 5"/>,
+    "chevron-right": <path d="m10 7 5 5-5 5"/>,
   };
   return <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
