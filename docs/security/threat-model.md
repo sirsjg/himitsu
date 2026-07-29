@@ -9,7 +9,7 @@ This model covers secret values and organization data-encryption keys (DEKs) fro
 - TLS protects traffic before it reaches the API process.
 - The API host is trusted while processing an authorized request. A fully compromised API process can observe plaintext that it is asked to decrypt; envelope encryption does not prevent this.
 - PostgreSQL, its replicas, snapshots, and backups are not trusted with plaintext or an unwrapped DEK.
-- The production KEK lives in a KMS/HSM and is usable only by the API workload identity. Self-hosted installations provide an exactly 32-byte base64 master key through a mounted runtime secret, separate from the database and backups.
+- The KEK is held outside PostgreSQL. The only wrapper shipped today is `LocalMasterKey`, which reads an exactly 32-byte base64 master key from a mounted runtime secret kept separate from the database and backups. The `KeyWrapper` interface in `packages/crypto` exists so a KMS- or HSM-backed wrapper can be substituted without touching the DEK or value layers, but no such implementation is included — a deployment wanting hardware-backed key custody has to write one.
 - Operating-system entropy is trusted for Node.js `randomBytes`.
 
 ## Threats and controls

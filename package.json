@@ -1,6 +1,26 @@
 {
   "name": "himitsu",
   "private": true,
+  "license": "Apache-2.0",
+  "author": "Steve Grehan",
+  "description": "Self-hosted secrets manager with per-tenant envelope encryption, versioned values, environment drift detection, and audit trails.",
+  "homepage": "https://github.com/sirsjg/himitsu-enterprise#readme",
+  "keywords": [
+    "secrets",
+    "secrets-management",
+    "configuration",
+    "encryption",
+    "envelope-encryption",
+    "self-hosted",
+    "postgresql"
+  ],
+  "bugs": {
+    "url": "https://github.com/sirsjg/himitsu-enterprise/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sirsjg/himitsu-enterprise.git"
+  },
   "type": "module",
   "workspaces": [
     "apps/*",

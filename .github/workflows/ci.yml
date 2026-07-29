@@ -26,6 +26,11 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm test
+      # Checks documentation structure and links, and fails when the committed
+      # docs/openapi.json has drifted from the routes the API actually serves.
+      # Without this the published contract silently goes stale — it had lost
+      # every auth and session route before this job was added.
+      - run: npm run docs:check
 
   postgres-integration:
     runs-on: ubuntu-latest
