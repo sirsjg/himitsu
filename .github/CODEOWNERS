@@ -1,0 +1,34 @@
+# Code owners are requested for review automatically on every pull request that
+# touches a matching path. Branch protection requires their approval before merge.
+#
+# Later entries win, so the security-sensitive paths below override the catch-all.
+
+* @sirsjg
+
+# Cryptography, the tenant boundary, and the authorization paths. A mistake in
+# any of these leaks other people's credentials, so they never merge unreviewed
+# even if the rest of the repository is later opened up to more maintainers.
+/packages/crypto/          @sirsjg
+/packages/auth/            @sirsjg
+/packages/authz/           @sirsjg
+/packages/tenancy/         @sirsjg
+/packages/api-keys/        @sirsjg
+/packages/audit/           @sirsjg
+
+# Migrations are checksummed and can never be edited after shipping, and these
+# define the row-level-security policies that back the tenant boundary.
+/packages/database/migrations/ @sirsjg
+
+# Supply chain and release surface: workflows can exfiltrate secrets, the
+# Dockerfile and deploy scripts define what actually runs in production, and
+# the lockfiles decide what code gets executed at build time.
+/.github/                  @sirsjg
+/Dockerfile                @sirsjg
+/compose.yaml              @sirsjg
+/deploy/                   @sirsjg
+/package-lock.json         @sirsjg
+/**/go.sum                 @sirsjg
+
+# Security posture documents.
+/SECURITY.md               @sirsjg
+/docs/security/            @sirsjg
