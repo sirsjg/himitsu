@@ -5,26 +5,61 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
+# Deliberately never triggered by pull_request. This workflow holds the production
+# deployment, and a fork PR must not be able to reach the environment or its OIDC
+# identity. Third-party actions are pinned by commit SHA rather than tag, because a
+# tag is mutable and this job can push images and change what production runs.
 permissions:
   contents: read
-  packages: write
-  id-token: write
 
 jobs:
-  publish:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.stamp.outputs.version }}
+      image_tag: ${{ steps.stamp.outputs.image_tag }}
+      commit: ${{ steps.stamp.outputs.commit }}
+    steps:
+      - name: Derive the build stamp
+        id: stamp
+        run: |
+          set -euo pipefail
+          commit="${GITHUB_SHA:0:7}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+            # docker/metadata-action emits semver image tags without the leading "v",
+            # so the deploy job needs the stripped form to address the pushed image.
+            image_tag="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev+${commit}"
+            image_tag="sha-${commit}"
+          fi
+          {
+            echo "version=${version}"
+            echo "image_tag=${image_tag}"
+            echo "commit=${commit}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${version} (${commit}) -> image tag ${image_tag}"
+
+  publish:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     strategy:
       matrix:
         target: [api, web, ops]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}-${{ matrix.target }}
@@ -33,13 +68,111 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           target: ${{ matrix.target }}
           push: true
+          # Stamps the release into the web bundle's footer and the API's /health/live,
+          # so a running container can always be traced back to the tag that built it.
+          build-args: |
+            HIMITSU_VERSION=${{ needs.version.outputs.version }}
+            HIMITSU_COMMIT=${{ needs.version.outputs.commit }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
           provenance: mode=max
           sbom: true
+
+  deploy:
+    needs: [version, publish]
+    # Only tags reach production; a manual dispatch on a branch publishes images but
+    # deliberately stops short of deploying.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    # The production environment gates the OIDC federated credential: its subject is
+    # repo:sirsjg/himitsu:environment:production, so no other workflow path can log in.
+    environment:
+      name: production
+      url: https://himitsu.tech
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      IMAGE_TAG: ${{ needs.version.outputs.image_tag }}
+      REGISTRY_PREFIX: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Apply database migrations
+        run: |
+          set -euo pipefail
+          image="${REGISTRY_PREFIX}-ops:${IMAGE_TAG}"
+          echo "::group::Pointing the migration job at ${image}"
+          az containerapp job update \
+            --resource-group "$RESOURCE_GROUP" --name himitsu-migrate \
+            --image "$image" --output none
+          echo "::endgroup::"
+
+          execution=$(az containerapp job start \
+            --resource-group "$RESOURCE_GROUP" --name himitsu-migrate \
+            --query name -o tsv)
+          echo "Started migration execution: ${execution}"
+
+          # Migrations must finish before new API replicas start, or a replica can serve
+          # against a schema it was not built for. Poll to completion and fail loudly.
+          for _ in $(seq 1 60); do
+            status=$(az containerapp job execution show \
+              --resource-group "$RESOURCE_GROUP" --name himitsu-migrate \
+              --job-execution-name "$execution" \
+              --query properties.status -o tsv 2>/dev/null || echo "Unknown")
+            echo "  status: ${status}"
+            case "$status" in
+              Succeeded) echo "Migrations applied."; exit 0 ;;
+              Failed|Degraded) echo "::error::Migration execution ${execution} reported ${status}"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Migration execution ${execution} did not complete within 10 minutes"
+          exit 1
+
+      - name: Roll the API and web revisions
+        run: |
+          set -euo pipefail
+          # The API rolls first: nginx re-resolves its upstream per request, so the web
+          # tier picks up the new API without needing to restart in lockstep.
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" --name api \
+            --image "${REGISTRY_PREFIX}-api:${IMAGE_TAG}" \
+            --set-env-vars "HIMITSU_VERSION=${{ needs.version.outputs.version }}" "HIMITSU_COMMIT=${{ needs.version.outputs.commit }}" \
+            --output none
+          echo "API rolled to ${IMAGE_TAG}"
+
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" --name web \
+            --image "${REGISTRY_PREFIX}-web:${IMAGE_TAG}" \
+            --output none
+          echo "Web rolled to ${IMAGE_TAG}"
+
+      - name: Verify the deployed version
+        run: |
+          set -euo pipefail
+          expected="${{ needs.version.outputs.version }}"
+          # Scale-to-zero means the first request pays a cold start, so allow retries.
+          for attempt in $(seq 1 20); do
+            body=$(curl -fsS --max-time 30 https://himitsu.tech/health/live 2>/dev/null || echo "")
+            reported=$(printf '%s' "$body" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+            if [ "$reported" = "$expected" ]; then
+              echo "himitsu.tech is serving ${reported}"
+              exit 0
+            fi
+            echo "  attempt ${attempt}: reported='${reported:-<none>}' expected='${expected}'"
+            sleep 15
+          done
+          echo "::error::himitsu.tech did not report ${expected} after the rollout"
+          exit 1
