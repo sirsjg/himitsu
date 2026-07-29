@@ -11,7 +11,9 @@ Prerequisites are Docker Engine with Compose v2, persistent storage sized for Po
 3. Start the stack with `docker compose up --build -d`.
 4. Confirm `http://localhost:8080/health/live` returns `{"status":"ok"}` and `/health/ready` returns `{"status":"ready"}`.
 
-The server exposes delivery adapters for verification, password-reset, and organization-invitation email. The repository defaults are no-op adapters for local development; configure a transactional email adapter before allowing external signup or invitations. Never log delivery tokens.
+Signing in requires a verified email address, and Himitsu currently ships only two delivery modes. `HIMITSU_EMAIL_DELIVERY=noop`, the default, silently discards verification, password-reset, and organization-invitation email — safe, but no account can complete signup. `HIMITSU_EMAIL_DELIVERY=log` prints the action links to API stdout; the links carry live authentication tokens, so use it only on a local or single-operator install whose logs are not shared or shipped to an aggregator.
+
+There is no SMTP or transactional-email adapter yet. A deployment serving more than one person needs one implemented against the delivery interface in `apps/api/src/server.ts`, which takes the `sendEmailVerification`, `sendPasswordReset`, and `sendOrganizationInvitation` callbacks. Until that exists, treat external signup as unsupported and never log delivery tokens anywhere they can be read by someone who should not hold them.
 
 The one-shot `migrate` service runs before the API. It holds a PostgreSQL advisory lock, applies each forward SQL migration once, validates the stored SHA-256 checksum on later starts, provisions the non-superuser `himitsu_app` role, and records versions in `schema_migrations`. A checksum mismatch fails deployment; shipped migrations must never be edited.
 
@@ -57,5 +59,7 @@ After restoration, verify `schema_migrations`, authenticate with a non-productio
 ## Releases
 
 Pull requests build all three Docker targets in CI. Tags matching `vMAJOR.MINOR.PATCH` trigger `.github/workflows/release.yml`, which publishes multi-architecture API, web, and operations images to GitHub Container Registry with provenance and SBOM attestations. Pin immutable version tags or digests in production rather than tracking `latest`.
+
+No version has been tagged yet, so no published images exist. Until the first release, `docker compose up --build` builds from source, and upgrading means pulling `main` and rebuilding. Treat `main` as unstable and take a verified backup before every upgrade.
 
 Before an upgrade, read the release notes, take and verify an encrypted backup, preserve the exact master-key file, and pull immutable image tags. Start the migration service before replacing the API, verify readiness and `schema_migrations`, then exercise login, one secret read, runtime ETag behavior, and the audit viewer. Roll back application images only when their schema compatibility is documented; restore the database backup when a migration is not backward compatible.

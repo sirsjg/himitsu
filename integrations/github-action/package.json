@@ -2,6 +2,13 @@
   "name": "@himitsu/github-action",
   "version": "0.0.0",
   "private": true,
+  "license": "Apache-2.0",
+  "author": "Steve Grehan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sirsjg/himitsu-enterprise.git",
+    "directory": "integrations/github-action"
+  },
   "type": "module",
   "description": "GitHub Action that loads secrets from a Himitsu environment.",
   "scripts": {

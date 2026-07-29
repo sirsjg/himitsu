@@ -1,0 +1,57 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security vulnerabilities here.** Use [private vulnerability reporting](https://github.com/sirsjg/himitsu-enterprise/security/advisories/new) instead — see [SECURITY.md](https://github.com/sirsjg/himitsu-enterprise/blob/main/SECURITY.md).
+
+        Never paste real secret values, API keys, session cookies, or master key material into this form.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - API
+        - Browser workspace
+        - CLI
+        - Kubernetes operator
+        - GitHub Action
+        - Terraform provider
+        - Go SDK
+        - Deployment / migrations
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Himitsu commit or tag, how you deployed it, Node.js and PostgreSQL versions, browser if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Redact anything sensitive. Request IDs from error envelopes are useful and safe to share.
+      render: shell

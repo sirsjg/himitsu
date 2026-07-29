@@ -1,10 +1,12 @@
 # Getting started
 
-This walkthrough takes a new Himitsu organization from an empty workspace to a project that can supply configuration to CI and application processes. Use a hosted deployment or complete the [self-hosting guide](self-hosting.md) first.
+This walkthrough takes a new Himitsu organization from an empty workspace to a project that can supply configuration to CI and application processes. There is no hosted version of Himitsu, so complete the [self-hosting guide](self-hosting.md) — or the quick start in the [README](../README.md) — before starting here.
 
 ## 1. Create the organization
 
-Sign up with a verified work email, sign in, and create or select an organization. The organization is the tenant boundary: memberships, projects, encryption keys, API keys, tags, and audit events never cross it.
+Sign up with a work email, verify it, sign in, and create or select an organization. The organization is the tenant boundary: memberships, projects, encryption keys, API keys, tags, and audit events never cross it.
+
+Verification is required before the first sign-in, and the default delivery mode discards email. On a local or single-operator install, set `HIMITSU_EMAIL_DELIVERY=log` and read the verification link from the API log (`docker compose logs api`). See [self-hosting](self-hosting.md) for why that mode is unsafe anywhere logs are shared, and for what a multi-user deployment needs instead.
 
 The Projects page shows a first-run checklist when the organization has no projects. Organization owners and administrators can finish profile, member, tag, API-key, and retention setup from **Settings**.
 

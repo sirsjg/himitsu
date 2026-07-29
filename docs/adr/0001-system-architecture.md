@@ -4,6 +4,8 @@
 - Date: 2026-07-21
 - Decision owners: Himitsu maintainers
 
+> **Note added on publication.** This record is kept as written. One premise has since changed: Himitsu is now an open source, self-hosted project only, and no managed service is planned. The architecture below is unaffected — the decisions that anticipated a managed deployment, chiefly the pluggable key wrapper and the strict separation of domain logic from the HTTP layer, are the same ones that make self-hosting and independent review workable.
+
 ## Context
 
 Himitsu is a multi-tenant secrets-management product with three public surfaces: a browser application, a versioned HTTP API, and a command-line client. It must keep secret plaintext out of durable storage and logs, provide consistent authorization across every surface, and support both a managed service and self-hosted deployments.

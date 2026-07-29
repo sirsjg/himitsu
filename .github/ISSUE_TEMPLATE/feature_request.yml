@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a change or addition
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Himitsu is deliberately narrow in scope. Proposals that widen the trust boundary or add a large new surface to keep correct are likely to be declined — see the project scope section of [CONTRIBUTING.md](https://github.com/sirsjg/himitsu-enterprise/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Himitsu makes hard or impossible today? Describe the situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including whether this could live outside Himitsu, in a script or an integration.
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security surface
+      options:
+        - label: This proposal would touch encryption, authentication, authorization, or the tenant boundary
+        - label: This proposal would add a new dependency
