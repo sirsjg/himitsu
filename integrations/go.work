@@ -1,0 +1,11 @@
+// Ties the three Go modules together for local development so an edit to the
+// shared client is picked up by the operator and provider without a release.
+// Each module also carries its own replace directive, so builds work with the
+// workspace disabled (GOWORK=off), which is what CI and Docker use.
+go 1.24
+
+use (
+	./client
+	./operator
+	./terraform-provider
+)

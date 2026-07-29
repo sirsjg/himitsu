@@ -70,3 +70,74 @@ jobs:
       - run: docker build --target api --tag himitsu-api:test .
       - run: docker build --target web --tag himitsu-web:test .
       - run: docker build --target ops --tag himitsu-ops:test .
+
+  integrations-go:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [client, operator, terraform-provider]
+    defaults:
+      run:
+        working-directory: integrations/${{ matrix.module }}
+    env:
+      # Build each module standalone via its own replace directive, so a broken
+      # module cannot be masked by the go.work workspace.
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: integrations/${{ matrix.module }}/go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo 'Run gofmt -w .'; exit 1; }
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test -race ./...
+
+  integrations-operator-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: integrations/operator/go.sum
+      - run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0
+      - name: Regenerate CRDs, RBAC, and deepcopy
+        working-directory: integrations/operator
+        env:
+          GOWORK: "off"
+        run: |
+          controller-gen object paths=./api/...
+          controller-gen crd rbac:roleName=himitsu-operator paths=./... \
+            output:crd:artifacts:config=config/crd \
+            output:rbac:artifacts:config=config/rbac
+      - name: Fail if generated files are stale
+        run: git diff --exit-code -- integrations/operator || {
+          echo 'Generated operator manifests are out of date. Re-run controller-gen and commit.'; exit 1; }
+
+  integrations-github-action:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/github-action
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The action is not an npm workspace member, but its tsconfig extends the
+      # repository base config and needs @types/node from the root install.
+      - name: Install root dev dependencies
+        working-directory: .
+        run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Fail if committed dist is stale
+        # GitHub runs the action from dist/, so a stale build ships old code.
+        run: git diff --exit-code -- dist || {
+          echo 'integrations/github-action/dist is out of date. Run npm run build and commit.'; exit 1; }
