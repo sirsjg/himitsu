@@ -40,7 +40,12 @@ test("operational endpoints expose liveness, database readiness, and value-free 
   try {
     const live = await app.inject({ method: "GET", url: "/health/live" });
     assert.equal(live.statusCode, 200);
-    assert.deepEqual(live.json(), { status: "ok" });
+    // The build stamp comes from the environment, so assert its shape rather than its
+    // value: it is "dev"/"unknown" in CI and the release tag in a published image.
+    const liveBody = live.json() as { status: string; version: string; commit: string };
+    assert.equal(liveBody.status, "ok");
+    assert.equal(typeof liveBody.version, "string");
+    assert.equal(typeof liveBody.commit, "string");
 
     const healthy = await app.inject({ method: "GET", url: "/health/ready" });
     assert.equal(healthy.statusCode, 200);

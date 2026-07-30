@@ -37,6 +37,12 @@ import {
 } from "@himitsu/tenancy";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
+// Stamped into the image by the Dockerfile from the release tag, so a running container
+// can always be matched back to the commit that produced it. Surfaced unauthenticated on
+// /health/live because that is the one endpoint reachable before anyone can sign in.
+const BUILD_VERSION = process.env.HIMITSU_VERSION?.trim() || "dev";
+const BUILD_COMMIT = process.env.HIMITSU_COMMIT?.trim() || "unknown";
+
 export type ApiActor =
   | { readonly type: "user"; readonly userId: string; readonly sessionId: string }
   | { readonly type: "api_key"; readonly apiKeyId: string; readonly prefix: string };
@@ -855,7 +861,7 @@ export async function buildApi(dependencies: ApiDependencies): Promise<FastifyIn
     contexts.set(request, context);
   });
 
-  app.get("/health/live", async () => ({ status: "ok" }));
+  app.get("/health/live", async () => ({ status: "ok", version: BUILD_VERSION, commit: BUILD_COMMIT }));
 
   app.get("/health/ready", async (_request, reply) => {
     try {

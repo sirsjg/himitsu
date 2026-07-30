@@ -5,26 +5,67 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
+# This repository builds and attests artifacts. It does not deploy, and it holds no
+# deploy credentials of any kind: there are no cloud secrets, no environments, and no
+# federated identity pointing at any infrastructure. Promotion is the private deploy
+# repository's job, which pins these images by digest.
+#
+# Never triggered by pull_request. Third-party actions are pinned by commit SHA
+# rather than tag, because a tag is mutable and this workflow signs what it builds.
 permissions:
   contents: read
-  packages: write
-  id-token: write
 
 jobs:
-  publish:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.stamp.outputs.version }}
+      image_tag: ${{ steps.stamp.outputs.image_tag }}
+      commit: ${{ steps.stamp.outputs.commit }}
+    steps:
+      - name: Derive the build stamp
+        id: stamp
+        run: |
+          set -euo pipefail
+          commit="${GITHUB_SHA:0:7}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+            # docker/metadata-action emits semver image tags without the leading "v".
+            image_tag="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev+${commit}"
+            image_tag="sha-${commit}"
+          fi
+          {
+            echo "version=${version}"
+            echo "image_tag=${image_tag}"
+            echo "commit=${commit}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${version} (${commit}) -> image tag ${image_tag}"
+
+  publish:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # id-token feeds Sigstore's keyless flow and the provenance attestation. It is
+      # scoped to this job and grants nothing outside GitHub's OIDC trust root.
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         target: [api, web, ops]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}-${{ matrix.target }}
@@ -33,13 +74,98 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build
         with:
           context: .
           target: ${{ matrix.target }}
           push: true
+          # Stamps the release into the web bundle's footer and the API's /health/live,
+          # so a running container can be traced back to the tag that built it.
+          build-args: |
+            HIMITSU_VERSION=${{ needs.version.outputs.version }}
+            HIMITSU_COMMIT=${{ needs.version.outputs.commit }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
           provenance: mode=max
           sbom: true
+
+      - name: Sign the image with cosign
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-${{ matrix.target }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Keyless: the signing identity is this workflow's OIDC identity, recorded in
+          # the public transparency log. There is no private key to hold or rotate.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          echo "Signed ${IMAGE}@${DIGEST}"
+
+      - name: Attest SLSA build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}-${{ matrix.target }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # Job outputs are shared across matrix legs and overwrite each other, so the
+      # digests travel to the pin job as artifacts instead.
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          printf '%s' "${DIGEST}" > "digests/${{ matrix.target }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.target }}
+          path: digests/${{ matrix.target }}
+          retention-days: 7
+
+  # Emits the exact digests to pin, so promoting a release is a copy of verified
+  # values into the deploy repository rather than a re-resolution of a mutable tag.
+  pin:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - name: Print the digest pin block
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          REPO: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          API=$(cat digests/api)
+          WEB=$(cat digests/web)
+          OPS=$(cat digests/ops)
+          {
+            echo "### Digest pins for \`${VERSION}\`"
+            echo
+            echo "Copy into \`images.json\` in the deploy repository:"
+            echo
+            echo '```json'
+            printf '{\n'
+            printf '  "version": "%s",\n' "${VERSION}"
+            printf '  "registry": "%s",\n' "${REPO}"
+            printf '  "images": {\n'
+            printf '    "api": "%s",\n' "${API}"
+            printf '    "web": "%s",\n' "${WEB}"
+            printf '    "ops": "%s"\n' "${OPS}"
+            printf '  }\n'
+            printf '}\n'
+            echo '```'
+            echo
+            echo "Verify before pinning:"
+            echo
+            echo '```sh'
+            echo "cosign verify ${REPO}-api@${API} \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

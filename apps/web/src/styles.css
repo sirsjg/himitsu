@@ -106,6 +106,7 @@ button { color: inherit; }
 .nav-link:hover { color: var(--ink); background: var(--surface-2); }
 .nav-link.active { color: var(--ink); border-left-color: var(--accent); background: var(--surface-2); }
 .sidebar-foot { margin-top: auto; display: flex; align-items: center; gap: 9px; padding: 14px 10px 4px; border-top: 1px solid var(--line); color: var(--faint); font-family: var(--font-mono); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+.build-tag { display: block; margin-top: 3px; color: color-mix(in srgb, var(--faint) 72%, transparent); font-size: var(--text-2xs); text-transform: none; letter-spacing: 0; }
 .sidebar-collapsed .sidebar { padding-inline: 12px; align-items: center; }
 .sidebar-collapsed .sidebar > .brand span, .sidebar-collapsed .nav-link span, .sidebar-collapsed .sidebar-foot span:last-child { display: none; }
 .sidebar-collapsed .sidebar > .brand { padding-inline: 0; }
