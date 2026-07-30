@@ -5,10 +5,13 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
-# Deliberately never triggered by pull_request. This workflow holds the production
-# deployment, and a fork PR must not be able to reach the environment or its OIDC
-# identity. Third-party actions are pinned by commit SHA rather than tag, because a
-# tag is mutable and this job can push images and change what production runs.
+# This repository builds and attests artifacts. It does not deploy, and it holds no
+# deploy credentials of any kind: there are no cloud secrets, no environments, and no
+# federated identity pointing at any infrastructure. Promotion is the private deploy
+# repository's job, which pins these images by digest.
+#
+# Never triggered by pull_request. Third-party actions are pinned by commit SHA
+# rather than tag, because a tag is mutable and this workflow signs what it builds.
 permissions:
   contents: read
 
@@ -27,8 +30,7 @@ jobs:
           commit="${GITHUB_SHA:0:7}"
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             version="${GITHUB_REF_NAME}"
-            # docker/metadata-action emits semver image tags without the leading "v",
-            # so the deploy job needs the stripped form to address the pushed image.
+            # docker/metadata-action emits semver image tags without the leading "v".
             image_tag="${GITHUB_REF_NAME#v}"
           else
             version="0.0.0-dev+${commit}"
@@ -47,13 +49,17 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # id-token feeds Sigstore's keyless flow and the provenance attestation. It is
+      # scoped to this job and grants nothing outside GitHub's OIDC trust root.
       id-token: write
+      attestations: write
     strategy:
       matrix:
         target: [api, web, ops]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -69,12 +75,13 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build
         with:
           context: .
           target: ${{ matrix.target }}
           push: true
           # Stamps the release into the web bundle's footer and the API's /health/live,
-          # so a running container can always be traced back to the tag that built it.
+          # so a running container can be traced back to the tag that built it.
           build-args: |
             HIMITSU_VERSION=${{ needs.version.outputs.version }}
             HIMITSU_COMMIT=${{ needs.version.outputs.commit }}
@@ -84,95 +91,81 @@ jobs:
           provenance: mode=max
           sbom: true
 
-  deploy:
-    needs: [version, publish]
-    # Only tags reach production; a manual dispatch on a branch publishes images but
-    # deliberately stops short of deploying.
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    # The production environment gates the OIDC federated credential: its subject is
-    # repo:sirsjg/himitsu:environment:production, so no other workflow path can log in.
-    environment:
-      name: production
-      url: https://himitsu.tech
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-      IMAGE_TAG: ${{ needs.version.outputs.image_tag }}
-      REGISTRY_PREFIX: ghcr.io/${{ github.repository }}
-    steps:
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+      - name: Sign the image with cosign
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-${{ matrix.target }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Keyless: the signing identity is this workflow's OIDC identity, recorded in
+          # the public transparency log. There is no private key to hold or rotate.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          echo "Signed ${IMAGE}@${DIGEST}"
+
+      - name: Attest SLSA build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          subject-name: ghcr.io/${{ github.repository }}-${{ matrix.target }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
-      - name: Apply database migrations
+      # Job outputs are shared across matrix legs and overwrite each other, so the
+      # digests travel to the pin job as artifacts instead.
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          image="${REGISTRY_PREFIX}-ops:${IMAGE_TAG}"
-          echo "::group::Pointing the migration job at ${image}"
-          az containerapp job update \
-            --resource-group "$RESOURCE_GROUP" --name himitsu-migrate \
-            --image "$image" --output none
-          echo "::endgroup::"
+          mkdir -p digests
+          printf '%s' "${DIGEST}" > "digests/${{ matrix.target }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.target }}
+          path: digests/${{ matrix.target }}
+          retention-days: 7
 
-          execution=$(az containerapp job start \
-            --resource-group "$RESOURCE_GROUP" --name himitsu-migrate \
-            --query name -o tsv)
-          echo "Started migration execution: ${execution}"
-
-          # Migrations must finish before new API replicas start, or a replica can serve
-          # against a schema it was not built for. Poll to completion and fail loudly.
-          for _ in $(seq 1 60); do
-            status=$(az containerapp job execution show \
-              --resource-group "$RESOURCE_GROUP" --name himitsu-migrate \
-              --job-execution-name "$execution" \
-              --query properties.status -o tsv 2>/dev/null || echo "Unknown")
-            echo "  status: ${status}"
-            case "$status" in
-              Succeeded) echo "Migrations applied."; exit 0 ;;
-              Failed|Degraded) echo "::error::Migration execution ${execution} reported ${status}"; exit 1 ;;
-            esac
-            sleep 10
-          done
-          echo "::error::Migration execution ${execution} did not complete within 10 minutes"
-          exit 1
-
-      - name: Roll the API and web revisions
+  # Emits the exact digests to pin, so promoting a release is a copy of verified
+  # values into the deploy repository rather than a re-resolution of a mutable tag.
+  pin:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - name: Print the digest pin block
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          REPO: ghcr.io/${{ github.repository }}
         run: |
           set -euo pipefail
-          # The API rolls first: nginx re-resolves its upstream per request, so the web
-          # tier picks up the new API without needing to restart in lockstep.
-          az containerapp update \
-            --resource-group "$RESOURCE_GROUP" --name api \
-            --image "${REGISTRY_PREFIX}-api:${IMAGE_TAG}" \
-            --set-env-vars "HIMITSU_VERSION=${{ needs.version.outputs.version }}" "HIMITSU_COMMIT=${{ needs.version.outputs.commit }}" \
-            --output none
-          echo "API rolled to ${IMAGE_TAG}"
-
-          az containerapp update \
-            --resource-group "$RESOURCE_GROUP" --name web \
-            --image "${REGISTRY_PREFIX}-web:${IMAGE_TAG}" \
-            --output none
-          echo "Web rolled to ${IMAGE_TAG}"
-
-      - name: Verify the deployed version
-        run: |
-          set -euo pipefail
-          expected="${{ needs.version.outputs.version }}"
-          # Scale-to-zero means the first request pays a cold start, so allow retries.
-          for attempt in $(seq 1 20); do
-            body=$(curl -fsS --max-time 30 https://himitsu.tech/health/live 2>/dev/null || echo "")
-            reported=$(printf '%s' "$body" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
-            if [ "$reported" = "$expected" ]; then
-              echo "himitsu.tech is serving ${reported}"
-              exit 0
-            fi
-            echo "  attempt ${attempt}: reported='${reported:-<none>}' expected='${expected}'"
-            sleep 15
-          done
-          echo "::error::himitsu.tech did not report ${expected} after the rollout"
-          exit 1
+          API=$(cat digests/api)
+          WEB=$(cat digests/web)
+          OPS=$(cat digests/ops)
+          {
+            echo "### Digest pins for \`${VERSION}\`"
+            echo
+            echo "Copy into \`images.json\` in the deploy repository:"
+            echo
+            echo '```json'
+            printf '{\n'
+            printf '  "version": "%s",\n' "${VERSION}"
+            printf '  "registry": "%s",\n' "${REPO}"
+            printf '  "images": {\n'
+            printf '    "api": "%s",\n' "${API}"
+            printf '    "web": "%s",\n' "${WEB}"
+            printf '    "ops": "%s"\n' "${OPS}"
+            printf '  }\n'
+            printf '}\n'
+            echo '```'
+            echo
+            echo "Verify before pinning:"
+            echo
+            echo '```sh'
+            echo "cosign verify ${REPO}-api@${API} \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
