@@ -6,7 +6,7 @@ This walkthrough takes a new Himitsu organization from an empty workspace to a p
 
 Sign up with a work email, verify it, sign in, and create or select an organization. The organization is the tenant boundary: memberships, projects, encryption keys, API keys, tags, and audit events never cross it.
 
-Verification is required before the first sign-in, and the default delivery mode discards email. On a local or single-operator install, set `HIMITSU_EMAIL_DELIVERY=log` and read the verification link from the API log (`docker compose logs api`). See [self-hosting](self-hosting.md) for why that mode is unsafe anywhere logs are shared, and for what a multi-user deployment needs instead.
+Verification is required before the first sign-in. Set `RESEND_API_KEY` and `HIMITSU_EMAIL_FROM` to have the verification email actually sent; see [self-hosting](self-hosting.md). Without a key, delivery is discarded and no account can complete signup. On a local or single-operator install you can instead set `HIMITSU_EMAIL_DELIVERY=log` and read the verification link from the API log (`docker compose logs api`) — those links carry live tokens, so never do that where logs are shared.
 
 The Projects page shows a first-run checklist when the organization has no projects. Organization owners and administrators can finish profile, member, tag, API-key, and retention setup from **Settings**.
 

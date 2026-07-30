@@ -3,7 +3,9 @@ import argon2 from "argon2";
 import type { Pool, PoolClient } from "pg";
 
 const TOKEN_BYTES = 32;
-const TOKEN_TTL_MS = 30 * 60 * 1000;
+/** Lifetime of email verification and password reset tokens. Exported so delivery
+ *  templates can state the expiry without hardcoding a value that could drift. */
+export const TOKEN_TTL_MS = 30 * 60 * 1000;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class AuthError extends Error {

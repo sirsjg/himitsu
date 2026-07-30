@@ -67,7 +67,18 @@ curl http://localhost:8080/health/ready   # {"status":"ready"}
 
 ### Completing signup
 
-Signing in requires a verified email address, and **the default email delivery mode discards mail**, so a fresh install cannot complete signup without one extra step. For a local or single-operator install, print the verification link to the API log instead:
+Signing in requires a verified email address, and **without a mail provider configured that email is discarded**, so a fresh install cannot complete signup without one extra step.
+
+For a real deployment, add a [Resend](https://resend.com) key. Verification, password reset, and invitations then work:
+
+```sh
+# In .env — the domain must be verified with Resend, and the From address must use it.
+RESEND_API_KEY=re_...
+HIMITSU_EMAIL_FROM="Himitsu <no-reply@example.com>"
+HIMITSU_APP_ORIGIN=https://himitsu.example.com
+```
+
+For a local or single-operator install, skip the provider and print the verification link to the API log instead:
 
 ```sh
 # In .env — LOCAL OR SINGLE-OPERATOR USE ONLY. These links carry live tokens,
@@ -81,7 +92,7 @@ Then sign up at `http://localhost:8080`, and take the link from the API logs:
 docker compose logs api | grep verification
 ```
 
-> **Note on real email.** Himitsu ships `noop` and `log` delivery modes only. There is no SMTP or transactional-email adapter yet, so a multi-user deployment that needs working signup, password reset, and invitation email requires implementing the delivery interface in `apps/api/src/server.ts`. This is the largest gap for anyone deploying Himitsu for a team, and contributions are welcome.
+The API logs its delivery mode at startup, and warns when mail is being discarded. See [self-hosting](docs/self-hosting.md#email) for every mode and for why a send failure is logged rather than raised.
 
 From here, follow the [getting started guide](docs/getting-started.md) to create an organization and project, import a `.env`, and connect CI.
 

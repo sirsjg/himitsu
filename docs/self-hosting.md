@@ -11,13 +11,39 @@ Prerequisites are Docker Engine with Compose v2, persistent storage sized for Po
 3. Start the stack with `docker compose up --build -d`.
 4. Confirm `http://localhost:8080/health/live` returns `{"status":"ok"}` and `/health/ready` returns `{"status":"ready"}`.
 
-Signing in requires a verified email address, and Himitsu currently ships only two delivery modes. `HIMITSU_EMAIL_DELIVERY=noop`, the default, silently discards verification, password-reset, and organization-invitation email — safe, but no account can complete signup. `HIMITSU_EMAIL_DELIVERY=log` prints the action links to API stdout; the links carry live authentication tokens, so use it only on a local or single-operator install whose logs are not shared or shipped to an aggregator.
-
-There is no SMTP or transactional-email adapter yet. A deployment serving more than one person needs one implemented against the delivery interface in `apps/api/src/server.ts`, which takes the `sendEmailVerification`, `sendPasswordReset`, and `sendOrganizationInvitation` callbacks. Until that exists, treat external signup as unsupported and never log delivery tokens anywhere they can be read by someone who should not hold them.
-
 The one-shot `migrate` service runs before the API. It holds a PostgreSQL advisory lock, applies each forward SQL migration once, validates the stored SHA-256 checksum on later starts, provisions the non-superuser `himitsu_app` role, and records versions in `schema_migrations`. A checksum mismatch fails deployment; shipped migrations must never be edited.
 
 The application master key is not stored in PostgreSQL. Losing it makes wrapped organization keys unusable. Back it up separately from database backups, with access limited to operators. Rotate it only through an application-supported key-rotation procedure; replacing the file in place does not rewrap existing keys.
+
+## Email
+
+Signing in requires a verified email address, so a deployment that anyone else will use needs working delivery.
+
+Set `RESEND_API_KEY` and `HIMITSU_EMAIL_FROM` and Himitsu sends real mail through [Resend](https://resend.com); verification, password reset, and organization invitations all work. The sending domain must be verified with Resend first, and `HIMITSU_EMAIL_FROM` must use that domain.
+
+```sh
+RESEND_API_KEY=re_...
+HIMITSU_EMAIL_FROM="Himitsu <no-reply@example.com>"
+HIMITSU_EMAIL_REPLY_TO=support@example.com   # optional
+HIMITSU_APP_ORIGIN=https://himitsu.example.com
+```
+
+`HIMITSU_APP_ORIGIN` matters: it builds the links in the email, so getting it wrong sends people somewhere that cannot consume the token.
+
+Without a key the behaviour is unchanged. `HIMITSU_EMAIL_DELIVERY` selects a mode explicitly and overrides the key when set:
+
+| Mode | Behaviour |
+| --- | --- |
+| unset | `resend` when `RESEND_API_KEY` is present, otherwise `noop` |
+| `noop` | Discards all delivery email. Safe, but **no account can complete signup**. |
+| `log` | Prints action links to API stdout. The links carry live authentication tokens. |
+| `resend` | Sends through Resend. Fails at startup if the key is missing. |
+
+Use `log` only on a local or single-operator install whose logs are not shared or shipped to an aggregator.
+
+A send failure is logged at error level and does not fail the request. That is deliberate: `requestPasswordReset` only reaches delivery for an address that has an account, so raising an error would tell an attacker which addresses are registered. Watch for `"msg":"email delivery failed"` in the API logs — with delivery misconfigured, signup appears to succeed and the email never arrives.
+
+The API logs its resolved mode once at startup (`email delivery mode: …`) and warns explicitly when mail is being discarded.
 
 ## Health, logs, and metrics
 

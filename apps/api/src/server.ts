@@ -10,6 +10,7 @@ import { ProjectService } from "@himitsu/projects";
 import { SecretService } from "@himitsu/secrets";
 import { TenantDatabase, TenancyService } from "@himitsu/tenancy";
 import { Pool } from "pg";
+import { emailDelivery } from "./email.js";
 import { buildApi } from "./index.js";
 
 function required(name: string): string {
@@ -35,34 +36,18 @@ async function masterKey(): Promise<string> {
   return file ? (await readFile(file, "utf8")).trim() : required("HIMITSU_MASTER_KEY_BASE64");
 }
 
-// "noop" (default) drops delivery emails: safe for production until a real adapter is configured,
-// but signup and invitations cannot complete. "log" prints action links to stdout for local
-// development only — the links carry live tokens, so never enable it where logs are shared.
-function emailDelivery(): { auth: ConstructorParameters<typeof AuthService>[1]; tenancy: ConstructorParameters<typeof TenancyService>[1] } {
-  const mode = process.env.HIMITSU_EMAIL_DELIVERY?.trim() || "noop";
-  if (mode === "noop") {
-    return {
-      auth: { async sendEmailVerification() {}, async sendPasswordReset() {} },
-      tenancy: { async sendOrganizationInvitation() {} },
-    };
-  }
-  if (mode !== "log") throw new Error("HIMITSU_EMAIL_DELIVERY must be \"noop\" or \"log\"");
-  const origin = (process.env.HIMITSU_APP_ORIGIN?.trim() || "http://localhost:8080").replace(/\/+$/, "");
-  const announce = (kind: string, email: string, link: string): void => {
-    console.log(JSON.stringify({ level: "warn", msg: `insecure log email delivery: ${kind}`, email, link }));
-  };
-  return {
-    auth: {
-      async sendEmailVerification(email, token) { announce("email verification", email, `${origin}/verify-email?token=${encodeURIComponent(token)}`); },
-      async sendPasswordReset(email, token) { announce("password reset", email, `${origin}/password-reset/confirm?token=${encodeURIComponent(token)}`); },
-    },
-    tenancy: {
-      async sendOrganizationInvitation({ email, token }) { announce("organization invitation", email, `${origin}/invites/${encodeURIComponent(token)}`); },
-    },
-  };
-}
-
+// Mode is chosen in ./email.ts: a RESEND_API_KEY selects real delivery, and its absence
+// keeps the previous "noop" behaviour, which drops mail and so leaves signup unable to
+// complete. Resolved before anything else so a misconfigured mailer fails at startup
+// rather than silently dropping the first verification email.
 const delivery = emailDelivery();
+console.log(JSON.stringify({ level: "info", msg: `email delivery mode: ${delivery.mode}` }));
+if (delivery.mode === "noop") {
+  console.log(JSON.stringify({
+    level: "warn",
+    msg: "email delivery is disabled: signup, password reset and invitations cannot complete. Set RESEND_API_KEY to enable delivery.",
+  }));
+}
 const insecureCookies = process.env.HIMITSU_INSECURE_HTTP_COOKIES?.trim() === "true";
 if (insecureCookies) {
   console.log(JSON.stringify({ level: "warn", msg: "HIMITSU_INSECURE_HTTP_COOKIES is enabled: session cookies are sent without the Secure flag. Local development only." }));
