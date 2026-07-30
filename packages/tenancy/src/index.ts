@@ -2,7 +2,9 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AuditEventInput, AuditTransaction, TransactionalAuditLog } from "@himitsu/audit";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 
-const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Lifetime of an organization invitation. Exported so delivery templates can state
+ *  the expiry without hardcoding a value that could drift. */
+export const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type OrganizationRole = "owner" | "admin" | "member" | "read_only";
 export type InvitationalRole = Exclude<OrganizationRole, "owner">;

@@ -57,3 +57,5 @@ Some of the security properties in the threat model depend on the deployment, no
 - Store the master key separately from database backups, with access limited to operators. Losing it makes every wrapped organization key unusable and there is no recovery path.
 - Keep the backup passphrase in a different location from the master key.
 - Do not enable `HIMITSU_EMAIL_DELIVERY=log` anywhere logs are shared. The links it prints carry live authentication tokens.
+- Keep `RESEND_API_KEY` out of the image and out of version control; supply it as a secret at runtime. It can send mail as your verified domain.
+- Email delivery failures are logged rather than raised, so that a password-reset request cannot be used to tell registered addresses from unknown ones. Alert on `"msg":"email delivery failed"`; otherwise a broken mailer looks like a working one.
