@@ -32,7 +32,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
 CMD ["node", "apps/api/dist/src/server.js"]
 
-FROM nginx:1.27-alpine AS web
+FROM nginx:1.31-alpine AS web
 # NGINX_ENTRYPOINT_LOCAL_RESOLVERS makes the entrypoint export NGINX_LOCAL_RESOLVERS from
 # /etc/resolv.conf; the envsubst filter admits that name alongside our own while still
 # leaving nginx's $uri, $host and $scheme untouched.
