@@ -1,3 +1,3 @@
-module github.com/sirsjg/himitsu-enterprise/integrations/client
+module github.com/sirsjg/himitsu/integrations/client
 
 go 1.24

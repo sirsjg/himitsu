@@ -1,9 +1,9 @@
-module github.com/sirsjg/himitsu-enterprise/integrations/operator
+module github.com/sirsjg/himitsu/integrations/operator
 
 go 1.26.0
 
 require (
-	github.com/sirsjg/himitsu-enterprise/integrations/client v0.0.0
+	github.com/sirsjg/himitsu/integrations/client v0.0.0
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
 	k8s.io/client-go v0.36.0
@@ -64,4 +64,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/sirsjg/himitsu-enterprise/integrations/client => ../client
+replace github.com/sirsjg/himitsu/integrations/client => ../client

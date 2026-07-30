@@ -17,7 +17,7 @@ If you are deciding whether to trust Himitsu with production credentials, the ho
 
 **Do not open a public issue for a security vulnerability.**
 
-Report privately through GitHub's [private vulnerability reporting](https://github.com/sirsjg/himitsu-enterprise/security/advisories/new) on this repository. That is the preferred channel because it keeps the report, the discussion, and the eventual advisory in one place.
+Report privately through GitHub's [private vulnerability reporting](https://github.com/sirsjg/himitsu/security/advisories/new) on this repository. That is the preferred channel because it keeps the report, the discussion, and the eventual advisory in one place.
 
 Please include:
 

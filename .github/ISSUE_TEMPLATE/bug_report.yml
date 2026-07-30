@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Do not report security vulnerabilities here.** Use [private vulnerability reporting](https://github.com/sirsjg/himitsu-enterprise/security/advisories/new) instead — see [SECURITY.md](https://github.com/sirsjg/himitsu-enterprise/blob/main/SECURITY.md).
+        **Do not report security vulnerabilities here.** Use [private vulnerability reporting](https://github.com/sirsjg/himitsu/security/advisories/new) instead — see [SECURITY.md](https://github.com/sirsjg/himitsu/blob/main/SECURITY.md).
 
         Never paste real secret values, API keys, session cookies, or master key material into this form.
   - type: textarea
