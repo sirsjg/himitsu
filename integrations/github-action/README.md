@@ -5,7 +5,7 @@ Loads secrets from a Himitsu environment into a workflow.
 ## Use
 
 ```yaml
-- uses: sirsjg/himitsu-enterprise/integrations/github-action@v1
+- uses: sirsjg/himitsu/integrations/github-action@v1
   with:
     api-url: https://himitsu.example.com
     token: ${{ secrets.HIMITSU_TOKEN }}
@@ -54,7 +54,7 @@ heredoc delimiter, so a value cannot inject additional variables.
 content is written so plaintext is never briefly world-readable.
 
 ```yaml
-- uses: sirsjg/himitsu-enterprise/integrations/github-action@v1
+- uses: sirsjg/himitsu/integrations/github-action@v1
   with:
     api-url: https://himitsu.example.com
     token: ${{ secrets.HIMITSU_TOKEN }}

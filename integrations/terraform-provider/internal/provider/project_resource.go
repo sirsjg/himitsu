@@ -10,7 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	himitsu "github.com/sirsjg/himitsu-enterprise/integrations/client"
+	himitsu "github.com/sirsjg/himitsu/integrations/client"
 )
 
 var (

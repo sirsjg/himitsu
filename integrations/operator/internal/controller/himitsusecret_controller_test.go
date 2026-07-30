@@ -18,8 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	himitsu "github.com/sirsjg/himitsu-enterprise/integrations/client"
-	himitsuv1alpha1 "github.com/sirsjg/himitsu-enterprise/integrations/operator/api/v1alpha1"
+	himitsu "github.com/sirsjg/himitsu/integrations/client"
+	himitsuv1alpha1 "github.com/sirsjg/himitsu/integrations/operator/api/v1alpha1"
 )
 
 const (

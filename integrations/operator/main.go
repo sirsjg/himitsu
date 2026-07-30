@@ -18,8 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	himitsuv1alpha1 "github.com/sirsjg/himitsu-enterprise/integrations/operator/api/v1alpha1"
-	"github.com/sirsjg/himitsu-enterprise/integrations/operator/internal/controller"
+	himitsuv1alpha1 "github.com/sirsjg/himitsu/integrations/operator/api/v1alpha1"
+	"github.com/sirsjg/himitsu/integrations/operator/internal/controller"
 )
 
 var scheme = runtime.NewScheme()

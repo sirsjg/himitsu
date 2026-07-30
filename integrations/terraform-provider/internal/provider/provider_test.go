@@ -12,7 +12,7 @@ import (
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	himitsu "github.com/sirsjg/himitsu-enterprise/integrations/client"
+	himitsu "github.com/sirsjg/himitsu/integrations/client"
 )
 
 func newProvider(t *testing.T) fwprovider.Provider {
