@@ -4,7 +4,7 @@ Himitsu is a self-hosted secrets manager. It stores configuration as encrypted, 
 
 The part that is less common: Himitsu also tells you when your environments have **drifted** — a key present in staging but missing in production, a value that is still a placeholder, a name that violates your convention, two keys differing only by case. That check runs in CI and fails the build.
 
-[![CI](https://github.com/sirsjg/himitsu-enterprise/actions/workflows/ci.yml/badge.svg)](https://github.com/sirsjg/himitsu-enterprise/actions/workflows/ci.yml)
+[![CI](https://github.com/sirsjg/himitsu/actions/workflows/ci.yml/badge.svg)](https://github.com/sirsjg/himitsu/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 ## Status: early, unaudited, no production track record
@@ -42,8 +42,8 @@ There is no hosted version of Himitsu and none is planned. Self-hosting is the o
 You need Docker Engine with Compose v2. This brings up PostgreSQL, runs migrations, and serves the app on `http://localhost:8080`.
 
 ```sh
-git clone https://github.com/sirsjg/himitsu-enterprise.git
-cd himitsu-enterprise
+git clone https://github.com/sirsjg/himitsu.git
+cd himitsu
 
 # Configuration and two independent passwords.
 cp .env.example .env

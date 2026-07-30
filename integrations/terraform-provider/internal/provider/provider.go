@@ -12,7 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	himitsu "github.com/sirsjg/himitsu-enterprise/integrations/client"
+	himitsu "github.com/sirsjg/himitsu/integrations/client"
 )
 
 // Ensure the provider satisfies the framework interfaces.

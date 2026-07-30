@@ -8,7 +8,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 
-	"github.com/sirsjg/himitsu-enterprise/integrations/terraform-provider/internal/provider"
+	"github.com/sirsjg/himitsu/integrations/terraform-provider/internal/provider"
 )
 
 // version is overwritten at release time with -ldflags="-X main.version=…".

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Himitsu is deliberately narrow in scope. Proposals that widen the trust boundary or add a large new surface to keep correct are likely to be declined — see the project scope section of [CONTRIBUTING.md](https://github.com/sirsjg/himitsu-enterprise/blob/main/CONTRIBUTING.md).
+        Himitsu is deliberately narrow in scope. Proposals that widen the trust boundary or add a large new surface to keep correct are likely to be declined — see the project scope section of [CONTRIBUTING.md](https://github.com/sirsjg/himitsu/blob/main/CONTRIBUTING.md).
   - type: textarea
     id: problem
     attributes:

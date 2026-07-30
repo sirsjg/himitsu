@@ -1,11 +1,11 @@
-module github.com/sirsjg/himitsu-enterprise/integrations/terraform-provider
+module github.com/sirsjg/himitsu/integrations/terraform-provider
 
 go 1.25.0
 
 require (
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-framework-validators v0.19.0
-	github.com/sirsjg/himitsu-enterprise/integrations/client v0.0.0
+	github.com/sirsjg/himitsu/integrations/client v0.0.0
 )
 
 require (
@@ -33,4 +33,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace github.com/sirsjg/himitsu-enterprise/integrations/client => ../client
+replace github.com/sirsjg/himitsu/integrations/client => ../client

@@ -6,7 +6,7 @@
   "author": "Steve Grehan",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sirsjg/himitsu-enterprise.git",
+    "url": "git+https://github.com/sirsjg/himitsu.git",
     "directory": "apps/web"
   },
   "type": "module",

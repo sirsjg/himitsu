@@ -162,7 +162,7 @@ The published repository is
 
 **Do not publish it with `git subtree split`.** The split would carry this
 module's `require`/`replace` on
-`github.com/sirsjg/himitsu-enterprise/integrations/client`, and because this
+`github.com/sirsjg/himitsu/integrations/client`, and because this
 monorepo is private that dependency is unresolvable — for installers, and for
 the Registry's own build. The published repository instead **vendors** the
 client at `internal/himitsu/`.
@@ -178,8 +178,8 @@ cp ../client/*.go           "$PUBLISHED"/internal/himitsu/
 
 cd "$PUBLISHED"
 sed -i '' 's|^package client$|package himitsu|' internal/himitsu/*.go
-sed -i '' 's|himitsu "github.com/sirsjg/himitsu-enterprise/integrations/client"|"github.com/himitsu-io/terraform-provider-himitsu/internal/himitsu"|' internal/provider/*.go
-grep -rn himitsu-enterprise . --include='*.go'   # must print nothing
+sed -i '' 's|himitsu "github.com/sirsjg/himitsu/integrations/client"|"github.com/himitsu-io/terraform-provider-himitsu/internal/himitsu"|' internal/provider/*.go
+grep -rn sirsjg/himitsu . --include='*.go'   # must print nothing
 go mod tidy && go test ./...
 tfplugindocs generate --provider-name himitsu    # refresh docs/
 ```
