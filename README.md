@@ -7,6 +7,8 @@ The part that is less common: Himitsu also tells you when your environments have
 [![CI](https://github.com/sirsjg/himitsu/actions/workflows/ci.yml/badge.svg)](https://github.com/sirsjg/himitsu/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+**Live instance: [himitsu.sg1.dev](https://himitsu.sg1.dev)** — a reference deployment of exactly what this repository builds, running the current tagged release. The footer shows which version and commit it is serving.
+
 ## Status: early, unaudited, no production track record
 
 Please read this before you put real credentials in it.
@@ -17,7 +19,7 @@ The engineering is deliberate — per-organization data-encryption keys under a 
 
 Run it for personal projects, run it for internal tooling, read the code, break it and tell me how. If you are choosing where your company's production credentials live, choose something with an audit and a track record — [OpenBao](https://openbao.org/), [Infisical](https://infisical.com/), or your cloud provider's secrets manager — and revisit this later.
 
-There is no hosted version of Himitsu and none is planned. Self-hosting is the only way to run it.
+There is no hosted *product* and none is planned. [himitsu.sg1.dev](https://himitsu.sg1.dev) is a reference deployment, not a service — it carries no support, no uptime commitment, and no guarantee its data survives. Self-hosting is the way to run Himitsu for anything you care about.
 
 ## What it does
 
