@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 # The release workflow passes the tag and short SHA in. There is no .git in the build
 # context, so without these the web bundle and API health stamp fall back to "dev".
 ARG HIMITSU_VERSION=dev
@@ -16,7 +16,7 @@ RUN ./scripts/build-all.sh
 FROM build AS production-deps
 RUN npm prune --omit=dev
 
-FROM node:22-bookworm-slim AS api
+FROM node:26-bookworm-slim AS api
 ARG HIMITSU_VERSION=dev
 ARG HIMITSU_COMMIT=unknown
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 \
