@@ -1,0 +1,59 @@
+# Rendered to /etc/nginx/conf.d/default.conf at container start by the nginx image's
+# envsubst entrypoint. Only ${HIMITSU_*} names are substituted (NGINX_ENVSUBST_FILTER in
+# the Dockerfile), so nginx's own $uri / $scheme / $host runtime variables survive intact.
+#
+# HIMITSU_API_UPSTREAM defaults to "api:3000" for Compose. Azure Container Apps fronts
+# internal ingress on port 80 and routes by Host header, so there it is set to the
+# internal FQDN with no port, e.g. "api.internal.<env>.australiaeast.azurecontainerapps.io".
+
+# Preserve the caller's scheme when a TLS-terminating ingress sits in front, and fall
+# back to our own when nothing set the header (plain-HTTP Compose).
+map $http_x_forwarded_proto $himitsu_forwarded_proto {
+  default $http_x_forwarded_proto;
+  ""      $scheme;
+}
+
+server {
+  listen 8080;
+  server_name _;
+  root /usr/share/nginx/html;
+  index index.html;
+
+  # Populated from /etc/resolv.conf by the image entrypoint, so this works unchanged
+  # against Docker's embedded DNS and the Container Apps platform resolver.
+  resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+  resolver_timeout 5s;
+
+  add_header X-Content-Type-Options nosniff always;
+  add_header Referrer-Policy no-referrer always;
+  add_header X-Frame-Options DENY always;
+
+  # Liveness for the web tier alone. /health/live proxies to the API, so probing it would
+  # report nginx as unhealthy whenever the API is cold or scaled to zero.
+  location = /nginx-health {
+    access_log off;
+    add_header Content-Type text/plain always;
+    return 200 "ok\n";
+  }
+
+  location ~ ^/(api/|health/|metrics$) {
+    # A literal proxy_pass host is resolved once at startup and cached for the life of
+    # the process. The API scales to zero and comes back on a different address, so the
+    # upstream goes through a variable instead, which forces per-request resolution
+    # against the resolver above and honours the TTL.
+    set $himitsu_upstream "${HIMITSU_API_UPSTREAM}";
+    proxy_pass http://$himitsu_upstream;
+    proxy_http_version 1.1;
+    # Container Apps internal ingress selects the target app from the Host header, so it
+    # must carry the upstream FQDN rather than the browser's. The original is forwarded
+    # separately for anything downstream that needs it.
+    proxy_set_header Host ${HIMITSU_API_UPSTREAM};
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $himitsu_forwarded_proto;
+  }
+
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+}
