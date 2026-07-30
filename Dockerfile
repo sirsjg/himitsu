@@ -45,7 +45,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD ["wget", "--quiet", "--spider", "http://127.0.0.1:8080/nginx-health"]
 
-FROM postgres:16 AS ops
+FROM postgres:18 AS ops
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
