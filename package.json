@@ -39,8 +39,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
-    "@types/pg": "^8.20.0",
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.3",
     "typescript": "^7.0.2"
   }
 }
