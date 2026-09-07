@@ -188,7 +188,7 @@ test("admin audit route renders filters, infinite history, exports, and retentio
   assert.match(html, /Export CSV/);
   assert.match(html, /Export JSON/);
   assert.match(html, /Retention/);
-  assert.match(html, /secret.updated/);
+  assert.match(html, /All actions/); // Menu options are mounted when the custom dropdown opens.
   assert.match(html, /Append-only/);
   assert.doesNotMatch(html, /postgres:\/\/|sk_live_/);
 

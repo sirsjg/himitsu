@@ -1,3 +1,4 @@
+import { Select } from "./Select.js";
 import {
   type FormEvent,
   type ReactNode,
@@ -382,11 +383,7 @@ function AppShell({ session, onSession, projects, projectsError, addProject }: {
           <label className="org-switcher">
             <span className="sr-only">Active organization</span>
             <span className="org-monogram" aria-hidden="true">{activeOrg?.name.slice(0, 1) ?? "H"}</span>
-            <select value={session.activeOrgId ?? ""} onChange={(event) => void switchOrg(event.target.value)}>
-              {organizations.map((organization) => (
-                <option key={organization.id} value={organization.id}>{organization.name}</option>
-              ))}
-            </select>
+            <Select value={session.activeOrgId ?? ""} onValueChange={(value) => void switchOrg(value)} aria-label="Active organization" options={organizations.map((organization) => ({ value: organization.id, label: organization.name }))} />
             <span className="role-pill">{(activeOrg?.role ?? "read_only").replace("_", " ")}</span>
           </label>
           <div className="topbar-actions">
@@ -445,7 +442,7 @@ function SettingsRoute(): ReactNode {
 }
 
 function NavigationLink({ to, label, icon }: { to: string; label: string; icon: IconName }): ReactNode {
-  return <NavLink to={to} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"}><Icon name={icon} /><span>{label}</span></NavLink>;
+  return <NavLink to={to} aria-label={label} title={label} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"}><Icon name={icon} /><span>{label}</span></NavLink>;
 }
 
 function CommandPalette({ items, onClose, onSelect }: {

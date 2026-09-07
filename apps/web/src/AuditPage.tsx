@@ -1,3 +1,4 @@
+import { Select } from "./Select.js";
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { apiFetch } from "./session.js";
 
@@ -158,7 +159,7 @@ export function AuditPage({
     <section className="audit-controls">
       <form onSubmit={apply} aria-label="Audit filters">
         <label>Actor<input value={draft.actor ?? ""} onChange={(event) => update("actor", event.target.value)} placeholder="Email, key, or actor ID" /></label>
-        <label>Action<select value={draft.action ?? ""} onChange={(event) => update("action", event.target.value)}>{actionOptions.map((action) => <option value={action} key={action}>{action || "All actions"}</option>)}</select></label>
+        <label>Action<Select value={draft.action ?? ""} onValueChange={(value) => update("action", value)} aria-label="Action" options={actionOptions.map((action) => ({ value: action, label: action || "All actions" }))} /></label>
         <label>Project ID<input value={draft.projectId ?? ""} onChange={(event) => update("projectId", event.target.value)} placeholder="All projects" /></label>
         <label>Environment ID<input value={draft.environmentId ?? ""} onChange={(event) => update("environmentId", event.target.value)} placeholder="All environments" /></label>
         <label>From<input type="datetime-local" value={draft.from ?? ""} onChange={(event) => update("from", event.target.value)} /></label>
