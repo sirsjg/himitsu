@@ -1,3 +1,4 @@
+import { Select } from "./Select.js";
 import {
   type FormEvent,
   type ReactNode,
@@ -607,9 +608,9 @@ function ConsistencyHealthPanel({ report, environments, error, diffError, source
   return <section className="health-panel" aria-label="Project consistency health">
     <header><div><span className="kicker">Cross-environment diff</span><h2>{report?.summary.healthy ? "Environments aligned" : "Configuration drift"}</h2></div><div className="health-summary"><strong>{report?.summary.activeFindings ?? "—"}<span>active findings</span></strong><strong>{report?.summary.exitCode ?? "—"}<span>CI exit code</span></strong><button type="button" onClick={onRefresh}>Refresh</button></div></header>
     <div className="diff-controls">
-      <label>Baseline environment<select aria-label="Baseline environment" value={sourceEnvironmentId} onChange={(event) => onSourceChange(event.target.value)}>{environments.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}</select></label>
+      <label>Baseline environment<Select aria-label="Baseline environment" value={sourceEnvironmentId} onValueChange={(value) => onSourceChange(value)} options={environments.map((environment) => ({ value: environment.id, label: environment.name }))} /></label>
       <span>Compare encrypted values without revealing them. Promote one key or the full baseline.</span>
-      <label>Promotion target<select aria-label="Promotion target" value={targetEnvironmentId} onChange={(event) => setTargetEnvironmentId(event.target.value)}>{availableTargets.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}{environment.protected ? " · protected" : ""}</option>)}</select></label>
+      <label>Promotion target<Select aria-label="Promotion target" value={targetEnvironmentId} onValueChange={(value) => setTargetEnvironmentId(value)} options={availableTargets.map((environment) => ({ value: environment.id, label: `${environment.name}${environment.protected ? " · protected" : ""}` }))} /></label>
       <button type="button" disabled={targetPreview === undefined || targetPreview.summary.selected === 0} onClick={() => onPromote(targetEnvironmentId)}>Review full promotion</button>
     </div>
     {error ? <p className="health-error" role="alert">{error}</p> : null}
