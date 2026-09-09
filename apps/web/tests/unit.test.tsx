@@ -21,6 +21,14 @@ import {
 } from "../src/SecretWorkspace.js";
 import type { SessionOrganization, SessionView } from "../src/session.js";
 import { createAuditClient } from "../src/AuditPage.js";
+import {
+  EnvironmentConfirmationError,
+  EnvironmentManager,
+  createEnvironmentClient,
+  environmentPermissions,
+  moveEnvironment,
+  suggestEnvironmentSlug,
+} from "../src/EnvironmentManager.js";
 import { createSettingsClient } from "../src/SettingsPage.js";
 
 /**
@@ -147,6 +155,14 @@ test("project creation posts the API contract and returns a workspace-ready proj
   });
   assert.deepEqual(request, { input: "/api/v1/projects", method: "POST", body: { name: "Payments API", slug: "payments-api" } });
   assert.deepEqual(project, { id: "project-id", name: "Payments API", slug: "payments-api", environments: [], tags: [] });
+
+  // Live environments win over the defaults setting, which only seeds a new project.
+  const live = await createProject({ name: "Live", slug: "live" }, async () => new Response(JSON.stringify({ data: {
+    id: "live-id", name: "Live", slug: "live",
+    settings: { defaultEnvironments: ["development", "staging", "production"] },
+    environments: [{ id: "env-1", name: "QA", slug: "qa", protected: false }, { id: "env-2", name: "Production", slug: "production", protected: true }],
+  } }), { status: 201, headers: { "content-type": "application/json" } }));
+  assert.deepEqual(live.environments, ["qa", "production"]);
 
   await assert.rejects(
     () => createProject({ name: "Duplicate", slug: "payments-api" }, async () => new Response(JSON.stringify({ error: { message: "Project slug already exists" } }), { status: 409 })),
@@ -455,4 +471,74 @@ test("version client compares masked or revealed history and rolls back with a p
     { input: "/api/v1/secrets/secret%2Fid/versions/compare?from=1&to=3&reveal=true" },
     { input: "/api/v1/secrets/secret%2Fid/versions/1/rollback", body: { expectedVersion: 3, changeNote: "Rollback to version 1" } },
   ]);
+});
+
+const environmentRows = [
+  { id: "env-development", name: "Development", slug: "development", protected: false },
+  { id: "env-staging", name: "Staging", slug: "staging", protected: false },
+  { id: "env-production", name: "Production", slug: "production", protected: true },
+] as const;
+
+test("environment client targets create, update, reorder, and confirmed delete routes", async () => {
+  const calls: Array<{ input: string; method?: string; body?: unknown }> = [];
+  const row = { id: "env-qa", orgId: "org", projectId: "project/id", name: "QA", slug: "qa", displayOrder: 3, protected: false, deletedAt: null, purgeAfter: null };
+  const client = createEnvironmentClient(async (input, init) => {
+    calls.push({ input, ...(init?.method === undefined ? {} : { method: init.method }), ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) });
+    return new Response(JSON.stringify({ data: input.endsWith("/reorder") || input.endsWith("?limit=100") ? [row] : row }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  assert.deepEqual(await client.list("project/id"), [{ id: "env-qa", name: "QA", slug: "qa", protected: false }]);
+  assert.equal((await client.create("project/id", { name: "QA", slug: "qa", protected: false })).slug, "qa");
+  assert.equal((await client.update("project/id", "env-qa", { protected: true })).id, "env-qa");
+  assert.equal((await client.reorder("project/id", ["env-qa"])).length, 1);
+  await client.remove("project/id", "env-qa", false);
+  await client.remove("project/id", "env-qa", true);
+  assert.deepEqual(calls, [
+    { input: "/api/v1/projects/project%2Fid/environments?limit=100" },
+    { input: "/api/v1/projects/project%2Fid/environments", method: "POST", body: { name: "QA", slug: "qa", protected: false } },
+    { input: "/api/v1/projects/project%2Fid/environments/env-qa", method: "PATCH", body: { protected: true } },
+    { input: "/api/v1/projects/project%2Fid/environments/reorder", method: "POST", body: { environmentIds: ["env-qa"] } },
+    { input: "/api/v1/projects/project%2Fid/environments/env-qa", method: "DELETE" },
+    { input: "/api/v1/projects/project%2Fid/environments/env-qa?confirmSecrets=true", method: "DELETE" },
+  ]);
+
+  const refusing = createEnvironmentClient(async () => new Response(
+    JSON.stringify({ error: { code: "SECRETS_REQUIRE_CONFIRMATION", message: "Confirm deletion because this environment contains active secrets" } }),
+    { status: 400, headers: { "content-type": "application/json" } },
+  ));
+  await assert.rejects(() => refusing.remove("project/id", "env-qa", false), EnvironmentConfirmationError);
+  const conflicting = createEnvironmentClient(async () => new Response(JSON.stringify({ error: { code: "SLUG_EXISTS", message: "Environment slug is already in use in this project" } }), { status: 409 }));
+  await assert.rejects(() => conflicting.create("project/id", { name: "QA", slug: "qa", protected: false }), /already in use/);
+});
+
+test("environment ordering helpers move rows within bounds and suggest slugs", () => {
+  assert.deepEqual(moveEnvironment(environmentRows, 2, -1).map(({ slug }) => slug), ["development", "production", "staging"]);
+  assert.deepEqual(moveEnvironment(environmentRows, 0, 1).map(({ slug }) => slug), ["staging", "development", "production"]);
+  assert.equal(moveEnvironment(environmentRows, 0, -1), environmentRows);
+  assert.equal(moveEnvironment(environmentRows, 2, 1), environmentRows);
+  assert.equal(suggestEnvironmentSlug("  QA / Load Test "), "qa-load-test");
+  assert.deepEqual(environmentPermissions("owner"), { manage: true, remove: true });
+  assert.deepEqual(environmentPermissions("member"), { manage: true, remove: false });
+  assert.deepEqual(environmentPermissions("read_only"), { manage: false, remove: false });
+});
+
+test("environment manager lists rows in order and gates controls by role", () => {
+  const render = (role: "owner" | "member" | "read_only") => renderToStaticMarkup(
+    <EnvironmentManager projectId="project-atlas" environments={environmentRows} role={role} secretCounts={{ "env-production": 2 }} onCancel={() => undefined} onChange={() => undefined} />,
+  );
+  const owner = render("owner");
+  assert.match(owner, /Manage environments/);
+  assert.ok(owner.indexOf("Development") < owner.indexOf("Staging") && owner.indexOf("Staging") < owner.indexOf("Production"));
+  assert.match(owner, /Move Development up/);
+  assert.match(owner, /Delete Production/);
+  assert.match(owner, /2 secrets/);
+  assert.match(owner, /Add environment/);
+  assert.match(owner, /Protected environment/);
+
+  const member = render("member");
+  assert.match(member, /Edit Staging/);
+  assert.doesNotMatch(member, /Delete Staging/);
+
+  const reader = render("read_only");
+  assert.doesNotMatch(reader, /Move Development up/);
+  assert.doesNotMatch(reader, /Add environment/);
 });

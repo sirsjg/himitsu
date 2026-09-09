@@ -168,7 +168,7 @@ const dateTime = { type: "string", format: "date-time" } as const;
 const nullableDateTime = { type: ["string", "null"], format: "date-time" } as const;
 const projectSchema = {
   type: "object", additionalProperties: false,
-  required: ["id", "orgId", "name", "slug", "description", "settings", "tagIds", "tags", "archivedAt", "deletedAt", "purgeAfter"],
+  required: ["id", "orgId", "name", "slug", "description", "settings", "tagIds", "tags", "environments", "archivedAt", "deletedAt", "purgeAfter"],
   properties: {
     id: uuid, orgId: uuid, name: { type: "string" }, slug: { type: "string" },
     description: { type: ["string", "null"] },
@@ -178,6 +178,7 @@ const projectSchema = {
     },
     tagIds: { type: "array", items: uuid }, archivedAt: nullableDateTime,
     tags: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "name", "color"], properties: { id: uuid, name: { type: "string" }, color: { type: "string" } } } },
+    environments: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "name", "slug", "protected"], properties: { id: uuid, name: { type: "string" }, slug: { type: "string" }, protected: { type: "boolean" } } } },
     deletedAt: nullableDateTime, purgeAfter: nullableDateTime,
   },
 } as const;

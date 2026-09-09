@@ -41,9 +41,18 @@ export interface Project {
   readonly settings: ProjectSettings;
   readonly tagIds: readonly string[];
   readonly tags: readonly ProjectTag[];
+  /** Active environments in display order; always reflects the live environment table, never the defaults setting. */
+  readonly environments: readonly ProjectEnvironmentSummary[];
   readonly archivedAt: Date | null;
   readonly deletedAt: Date | null;
   readonly purgeAfter: Date | null;
+}
+
+export interface ProjectEnvironmentSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly slug: string;
+  readonly protected: boolean;
 }
 
 interface ProjectRow {
@@ -58,6 +67,7 @@ interface ProjectRow {
   purge_after: Date | null;
   tag_ids: string[] | null;
   tags: ProjectTag[] | null;
+  environments: ProjectEnvironmentSummary[] | null;
 }
 
 interface AuditRecorder {
@@ -114,6 +124,7 @@ function fromRow(row: ProjectRow): Project {
     settings: { defaultEnvironments },
     tagIds: row.tag_ids ?? [],
     tags: row.tags ?? [],
+    environments: row.environments ?? [],
     archivedAt: row.archived_at,
     deletedAt: row.deleted_at,
     purgeAfter: row.purge_after,
@@ -125,7 +136,10 @@ const projectSelect = `
          p.archived_at, p.deleted_at, p.purge_after,
          COALESCE(array_agg(pt.tag_id ORDER BY lower(t.name), pt.tag_id) FILTER (WHERE pt.tag_id IS NOT NULL), '{}') AS tag_ids,
          COALESCE(jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color)
-           ORDER BY lower(t.name), t.id) FILTER (WHERE t.id IS NOT NULL), '[]'::jsonb) AS tags
+           ORDER BY lower(t.name), t.id) FILTER (WHERE t.id IS NOT NULL), '[]'::jsonb) AS tags,
+         (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', e.id, 'name', e.name, 'slug', e.slug, 'protected', e.protected)
+                   ORDER BY e.display_order, e.id), '[]'::jsonb)
+          FROM environments e WHERE e.project_id = p.id AND e.deleted_at IS NULL) AS environments
   FROM projects p
   LEFT JOIN project_tags pt ON pt.project_id = p.id AND pt.org_id = p.org_id
   LEFT JOIN tags t ON t.id = pt.tag_id AND t.org_id = pt.org_id`;

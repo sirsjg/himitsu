@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { apiFetch } from "./session.js";
+import { EnvironmentManager, environmentPermissions, type EnvironmentClient, type EnvironmentRole } from "./EnvironmentManager.js";
 
 export interface EnvironmentView {
   readonly id: string;
@@ -272,7 +273,10 @@ function metadataToView(metadata: ApiSecretMetadata): SecretView {
 export function SecretWorkspace({
   projectId,
   projectName,
-  environments,
+  environments: initialEnvironments,
+  role = "read_only",
+  environmentClient,
+  onEnvironmentsChange,
   initialSecrets = [],
   initialHealth = null,
   initialPromotionPreviews = {},
@@ -281,11 +285,17 @@ export function SecretWorkspace({
   projectId: string;
   projectName: string;
   environments: readonly EnvironmentView[];
+  role?: EnvironmentRole;
+  environmentClient?: EnvironmentClient;
+  /** Notifies the shell so project cards reflect the live environment list. */
+  onEnvironmentsChange?: (environments: readonly EnvironmentView[]) => void;
   initialSecrets?: readonly SecretView[];
   initialHealth?: ConsistencyReportView | null;
   initialPromotionPreviews?: Readonly<Record<string, SecretPromotionPreviewView>>;
   client?: SecretClient;
 }): ReactNode {
+  const [environments, setEnvironments] = useState<readonly EnvironmentView[]>(initialEnvironments);
+  const [managingEnvironments, setManagingEnvironments] = useState(false);
   const [activeEnvironmentId, setActiveEnvironmentId] = useState(environments[0]?.id ?? "");
   const [secrets, setSecrets] = useState<readonly SecretView[]>(initialSecrets);
   const [query, setQuery] = useState("");
@@ -306,6 +316,7 @@ export function SecretWorkspace({
   const remaskTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const environment = environments.find(({ id }) => id === activeEnvironmentId) ?? environments[0];
   const environmentSecrets = secrets.filter(({ environmentId }) => environmentId === activeEnvironmentId);
+  const secretCounts = Object.fromEntries(environments.map((item) => [item.id, secrets.filter(({ environmentId }) => environmentId === item.id).length]));
   const tags = [...new Set(environmentSecrets.flatMap(({ tags: rowTags }) => rowTags))].sort();
   const visibleSecrets = useMemo(
     () => filterSecretRows(environmentSecrets, query, activeTag),
@@ -317,8 +328,8 @@ export function SecretWorkspace({
     catch (reason) { setHealthError(reason instanceof Error ? reason.message : "Project health could not be loaded."); }
   };
 
-  const refreshDiff = async (sourceEnvironmentId = diffSourceEnvironmentId) => {
-    const targets = environments.filter(({ id }) => id !== sourceEnvironmentId);
+  const refreshDiff = async (sourceEnvironmentId = diffSourceEnvironmentId, rows: readonly EnvironmentView[] = environments) => {
+    const targets = rows.filter(({ id }) => id !== sourceEnvironmentId);
     const results = await Promise.allSettled(targets.map((target) => client.previewPromotion(
       projectId, target.id, sourceEnvironmentId,
     )));
@@ -335,6 +346,23 @@ export function SecretWorkspace({
   };
 
   useEffect(() => { void refreshHealth(); void refreshDiff(diffSourceEnvironmentId); }, [client, projectId, diffSourceEnvironmentId]);
+
+  /** Applies an environment list returned by the manager: drops orphaned secrets, repairs selections, and refreshes the diff. */
+  const applyEnvironments = (rows: readonly EnvironmentView[]) => {
+    const ids = new Set(rows.map(({ id }) => id));
+    setEnvironments(rows);
+    onEnvironmentsChange?.(rows);
+    setSecrets((current) => current.filter(({ environmentId }) => ids.has(environmentId)));
+    if (!ids.has(activeEnvironmentId)) { setActiveEnvironmentId(rows[0]?.id ?? ""); setActiveTag(null); }
+    if (!ids.has(diffSourceEnvironmentId)) {
+      setDiffSourceEnvironmentId(rows[0]?.id ?? "");
+      setPromotionPreviews({});
+      setPromotion(null);
+      return;
+    }
+    void refreshHealth();
+    void refreshDiff(diffSourceEnvironmentId, rows);
+  };
 
   useEffect(() => {
     void client.listTags().then(setAvailableTags).catch((reason) => {
@@ -525,6 +553,7 @@ export function SecretWorkspace({
       />
       <nav className="environment-tabs" aria-label="Project environments">
         {environments.map((item) => <button key={item.id} type="button" className={item.id === activeEnvironmentId ? "active" : ""} onClick={() => { setActiveEnvironmentId(item.id); setActiveTag(null); }}><span>{item.name}</span><small>{secrets.filter(({ environmentId }) => environmentId === item.id).length}</small>{item.protected ? <b title="Protected environment">◆</b> : null}</button>)}
+        {environmentPermissions(role).manage ? <button type="button" className="manage-environments" onClick={() => setManagingEnvironments(true)}>Manage</button> : null}
       </nav>
       <section className="secret-panel">
         <header className="secret-toolbar">
@@ -554,6 +583,15 @@ export function SecretWorkspace({
       </section>
       {bulkOpen && environment ? <DotenvImport projectId={projectId} environmentId={environment.id} client={client} onCancel={() => setBulkOpen(false)} onImported={finishImport} /> : null}
       {historySecret ? <VersionDrawer secret={historySecret} client={client} onClose={() => setHistorySecret(null)} onRolledBack={finishRollback} /> : null}
+      {managingEnvironments ? <EnvironmentManager
+        projectId={projectId}
+        environments={environments}
+        role={role}
+        secretCounts={secretCounts}
+        {...(environmentClient === undefined ? {} : { client: environmentClient })}
+        onCancel={() => setManagingEnvironments(false)}
+        onChange={applyEnvironments}
+      /> : null}
       {promotion ? <PromotionDialog
         projectId={projectId}
         environments={environments}

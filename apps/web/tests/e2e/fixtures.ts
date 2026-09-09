@@ -14,6 +14,12 @@ export async function installApi(page: Page, populated = false): Promise<void> {
     { id: "long-project", name: "International payment processing", slug: "international-payment-processing", settings: { defaultEnvironments: ["development", "staging", "production"] }, tags: [] },
   ] : [];
   const serviceKeys: Array<Record<string, unknown>> = [];
+  const environments: Array<{ id: string; name: string; slug: string; displayOrder: number; protected: boolean }> = [
+    { id: "development", name: "Development", slug: "development", displayOrder: 0, protected: false },
+    { id: "staging", name: "Staging", slug: "staging", displayOrder: 1, protected: false },
+    { id: "production", name: "Production", slug: "production", displayOrder: 2, protected: true },
+  ];
+  const environmentRow = (row: typeof environments[number]) => ({ ...row, orgId: "org-studio", projectId: "e2e-project", deletedAt: null, purgeAfter: null });
   let nextSecret = 1;
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
@@ -28,14 +34,37 @@ export async function installApi(page: Page, populated = false): Promise<void> {
       });
     }
     if (path === "/api/v1/projects" && request.method() === "GET") {
-      return json(route, [...createdProjects]);
+      return json(route, createdProjects.map((project) => project.id === "e2e-project" ? { ...project, environments: environments.map(environmentRow) } : project));
     }
-    if (path.endsWith("/environments") && request.method() === "GET") {
-      return json(route, [
-        { id: "development", orgId: "org-studio", projectId: "e2e-project", name: "Development", slug: "development", displayOrder: 0, protected: false, deletedAt: null, purgeAfter: null },
-        { id: "staging", orgId: "org-studio", projectId: "e2e-project", name: "Staging", slug: "staging", displayOrder: 1, protected: false, deletedAt: null, purgeAfter: null },
-        { id: "production", orgId: "org-studio", projectId: "e2e-project", name: "Production", slug: "production", displayOrder: 2, protected: true, deletedAt: null, purgeAfter: null },
-      ]);
+    if (path.endsWith("/environments") && request.method() === "GET") return json(route, environments.map(environmentRow));
+    if (path.endsWith("/environments") && request.method() === "POST") {
+      const body = request.postDataJSON() as { name: string; slug: string; protected?: boolean };
+      if (environments.some(({ slug }) => slug === body.slug)) {
+        return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "SLUG_EXISTS", message: "Environment slug is already in use in this project" } }) });
+      }
+      const created = { id: body.slug, name: body.name, slug: body.slug, displayOrder: environments.length, protected: body.protected ?? false };
+      environments.push(created);
+      return json(route, environmentRow(created), 201);
+    }
+    if (path.endsWith("/environments/reorder") && request.method() === "POST") {
+      const { environmentIds } = request.postDataJSON() as { environmentIds: string[] };
+      environments.sort((left, right) => environmentIds.indexOf(left.id) - environmentIds.indexOf(right.id));
+      environments.forEach((row, index) => { row.displayOrder = index; });
+      return json(route, environments.map(environmentRow));
+    }
+    const environmentMatch = /\/environments\/([^/]+)$/.exec(path);
+    const targetEnvironment = environmentMatch === null ? undefined : environments.find(({ id }) => id === environmentMatch[1]);
+    if (targetEnvironment !== undefined && request.method() === "PATCH") {
+      Object.assign(targetEnvironment, request.postDataJSON() as Partial<typeof targetEnvironment>);
+      return json(route, environmentRow(targetEnvironment));
+    }
+    if (targetEnvironment !== undefined && request.method() === "DELETE") {
+      const holdsSecrets = targetEnvironment.id === "development" && keys.size > 0;
+      if (holdsSecrets && new URL(request.url()).searchParams.get("confirmSecrets") !== "true") {
+        return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: { code: "SECRETS_REQUIRE_CONFIRMATION", message: "Confirm deletion because this environment contains active secrets" } }) });
+      }
+      environments.splice(environments.indexOf(targetEnvironment), 1);
+      return json(route, environmentRow(targetEnvironment));
     }
     if (path.endsWith("/secrets") && request.method() === "GET") {
       return json(route, [...keys].sort().map((key, index) => ({ id: `secret-${index + 1}`, orgId: "org-studio", projectId: "e2e-project", environmentId: "development", key, notes: null, currentVersion: 1, updatedAt: now, tagIds: [], tags: [] })));
@@ -53,7 +82,7 @@ export async function installApi(page: Page, populated = false): Promise<void> {
     if (path === "/api/v1/projects" && request.method() === "POST") {
       const project = { id: "e2e-project", orgId: "org-studio", name: "E2E Vault", slug: "e2e-vault", description: null, settings: { defaultEnvironments: ["development", "staging", "production"] }, tagIds: [], tags: [], archivedAt: null, deletedAt: null, purgeAfter: null };
       createdProjects.push(project);
-      return json(route, project, 201);
+      return json(route, { ...project, environments: environments.map(environmentRow) }, 201);
     }
     if (path === "/api/v1/tags" && request.method() === "GET") return json(route, []);
     if (path.endsWith("/consistency")) {

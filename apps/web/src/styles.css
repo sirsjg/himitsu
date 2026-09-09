@@ -308,7 +308,7 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .health-matrix-row > *:last-child { border-right: 0; }
 .health-matrix-row > code { color: var(--ink); font-family: var(--font-mono); font-size: var(--text-xs); }
 .health-matrix-head { position: sticky; z-index: 1; top: 0; color: var(--faint); background: var(--surface-2); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
-.health-cell { justify-content: flex-start; flex-wrap: wrap; gap: 5px 7px; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; }
+.health-cell { justify-content: flex-start; align-content: flex-start; flex-wrap: wrap; gap: 5px 7px; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; }
 .health-cell::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .health-cell span { margin-right: auto; }
 .health-cell em { width: 100%; padding-left: 14px; color: var(--faint); font-size: var(--text-2xs); font-style: normal; letter-spacing: .04em; }
@@ -458,6 +458,39 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .promotion-list span.create { color: var(--accent-text); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .promotion-list span.overwrite { color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, transparent); }
 .promotion-list small { color: var(--faint); font-size: var(--text-2xs); text-align: right; }
+
+.environment-tabs .manage-environments { min-width: 0; margin-left: auto; border-right: 0; border-left: 1px solid var(--line); color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+.environment-tabs .manage-environments::after { display: none; }
+.environment-sheet { width: min(680px, calc(100vw - 60px)); }
+.environment-sheet header p { max-width: 460px; margin: 6px 0 0; color: var(--muted); font-size: var(--text-sm); }
+.environment-list { border: 1px solid var(--line); border-radius: 7px; }
+.environment-list > div, .environment-list > form { display: grid; gap: 8px 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.environment-list > div { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.environment-list > :last-child { border-bottom: 0; }
+.environment-identity { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.environment-identity strong { color: var(--ink); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+.environment-identity strong b { margin-left: 6px; color: var(--accent-text); font-size: var(--text-2xs); }
+.environment-identity code { color: var(--muted); font-family: var(--font-mono); font-size: var(--text-xs); }
+.environment-identity small { color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+.environment-controls { display: flex; gap: 5px; }
+.environment-controls button, .environment-confirm button, .environment-form .form-actions button { height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; font-family: var(--font-mono); font-size: var(--text-xs); cursor: pointer; }
+.environment-controls button:hover:not(:disabled), .environment-confirm button:hover:not(:disabled), .environment-form .form-actions button:hover:not(:disabled) { color: var(--accent-text); border-color: var(--accent); }
+.environment-controls button:disabled, .environment-confirm button:disabled, .environment-form .form-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.environment-controls button.danger, .environment-confirm button.danger { color: var(--danger); }
+.environment-controls button.danger:hover:not(:disabled), .environment-confirm button.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.environment-confirm { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--line)); border-radius: 5px; color: var(--danger); background: color-mix(in srgb, var(--danger) 6%, transparent); font-size: var(--text-sm); }
+.environment-confirm span { flex: 1 1 240px; }
+.environment-form, .environment-create { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: end; }
+.environment-create { display: grid; gap: 10px 12px; padding: 14px; border: 1px dashed var(--line-strong); border-radius: 7px; }
+.environment-create h3 { grid-column: 1 / -1; margin: 0; color: var(--ink); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+.environment-form label, .environment-create label { display: grid; gap: 6px; color: var(--muted); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+.environment-form .check-row, .environment-create .check-row { display: flex; align-items: center; gap: 8px; min-height: var(--control-height); color: var(--muted); font-size: var(--text-sm); font-weight: 400; }
+.environment-form .form-actions, .environment-create .form-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.environment-sheet > footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--faint); font-size: var(--text-xs); }
+@media (max-width: 560px) {
+  .environment-form, .environment-create { grid-template-columns: 1fr; }
+  .environment-list > div { grid-template-columns: 1fr; }
+}
 .drawer-backdrop { justify-items: end; }
 .version-drawer { width: min(460px, 48vw); height: 100vh; display: grid; grid-template-rows: auto 1fr auto; padding: 27px; border-left: 1px solid var(--line-strong); background: var(--surface); box-shadow: var(--shadow); }
 .version-drawer header p { max-width: 320px; margin: 6px 0 0; color: var(--muted); font-size: var(--text-sm); line-height: var(--leading-normal); }
