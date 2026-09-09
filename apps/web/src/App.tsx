@@ -96,6 +96,7 @@ interface ApiProject {
   readonly name: string;
   readonly slug: string;
   readonly settings?: { readonly defaultEnvironments?: readonly string[] };
+  readonly environments?: readonly { readonly slug: string }[];
   readonly tags?: readonly { readonly name: string }[];
 }
 
@@ -104,7 +105,7 @@ function toProjectLink(project: ApiProject): ProjectQuickLink {
     id: project.id,
     name: project.name,
     slug: project.slug,
-    environments: project.settings?.defaultEnvironments ?? [],
+    environments: project.environments?.map(({ slug }) => slug) ?? project.settings?.defaultEnvironments ?? [],
     tags: (project.tags ?? []).map(({ name }) => name),
   };
 }
@@ -188,6 +189,7 @@ interface WorkspaceContext {
   readonly role: SessionOrganization["role"];
   readonly projects: readonly ProjectQuickLink[] | undefined;
   readonly addProject: (project: ProjectQuickLink) => void;
+  readonly updateProjectEnvironments: (projectId: string, environments: readonly EnvironmentView[]) => void;
 }
 
 function AuthenticatedApp({ session, sessionError, onSession, initialProjects }: {
@@ -220,6 +222,7 @@ function AuthenticatedApp({ session, sessionError, onSession, initialProjects }:
       projects={projects}
       projectsError={projectsError}
       addProject={(project) => setProjects((current) => [...(current ?? []), project])}
+      updateProjectEnvironments={(projectId, rows) => setProjects((current) => current?.map((project) => project.id === projectId ? { ...project, environments: rows.map(({ slug }) => slug) } : project))}
     />
   );
 }
@@ -290,12 +293,13 @@ function OrgSetupPage({ session, onSession }: { session: SessionView; onSession:
   );
 }
 
-function AppShell({ session, onSession, projects, projectsError, addProject }: {
+function AppShell({ session, onSession, projects, projectsError, addProject, updateProjectEnvironments }: {
   session: SessionView;
   onSession: (session: SessionView) => void;
   projects: readonly ProjectQuickLink[] | undefined;
   projectsError: string | null;
   addProject: (project: ProjectQuickLink) => void;
+  updateProjectEnvironments: WorkspaceContext["updateProjectEnvironments"];
 }): ReactNode {
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -347,7 +351,7 @@ function AppShell({ session, onSession, projects, projectsError, addProject }: {
     }
   };
 
-  const context: WorkspaceContext = { role: activeOrg?.role ?? "read_only", projects, addProject };
+  const context: WorkspaceContext = { role: activeOrg?.role ?? "read_only", projects, addProject, updateProjectEnvironments };
 
   return (
     <div className={sidebarCollapsed ? "app-frame sidebar-collapsed" : "app-frame"}>
@@ -427,8 +431,8 @@ function ProjectsIndexRoute(): ReactNode {
 }
 
 function ProjectLandingRoute(): ReactNode {
-  const { projects } = useOutletContext<WorkspaceContext>();
-  return <ProjectLanding projects={projects} />;
+  const { role, projects, updateProjectEnvironments } = useOutletContext<WorkspaceContext>();
+  return <ProjectLanding role={role} projects={projects} onEnvironmentsChange={updateProjectEnvironments} />;
 }
 
 function AuditRoute(): ReactNode {
@@ -542,7 +546,7 @@ function FirstRunChecklist({ onCreate }: { onCreate: () => void }): ReactNode {
   return <section className="onboarding-panel" aria-labelledby="onboarding-heading"><header><span className="kicker">First-run checklist</span><h2 id="onboarding-heading">Build your first encrypted workflow.</h2><p>Four small steps take a new organization from an empty workspace to CI-ready secret delivery.</p></header><ol><li className="complete"><i>✓</i><span><strong>Organization ready</strong><small>Your tenant boundary and audit trail are active.</small></span></li><li className="current"><i>2</i><span><strong>Create a project</strong><small>Projects group environments and their encrypted configuration.</small></span><button className="primary-button" type="button" onClick={onCreate}>Create first project</button></li><li><i>3</i><span><strong>Import your .env</strong><small>Open the project and use Bulk paste to preview before writing.</small></span></li><li><i>4</i><span><strong>Connect CI or runtime</strong><small>Create a scoped read-only API key in Settings, then use the CLI or runtime endpoint.</small></span></li></ol><footer><span>The repository guide mirrors this checklist with copy-ready CLI and CI commands.</span><NavLink to="/app/settings">Prepare CI access →</NavLink></footer></section>;
 }
 
-function ProjectLanding({ projects }: { projects: readonly ProjectQuickLink[] | undefined }): ReactNode {
+function ProjectLanding({ role, projects, onEnvironmentsChange }: { role: SessionOrganization["role"]; projects: readonly ProjectQuickLink[] | undefined; onEnvironmentsChange: (projectId: string, environments: readonly EnvironmentView[]) => void }): ReactNode {
   const { projectId } = useParams();
   const [environments, setEnvironments] = useState<readonly EnvironmentView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -561,7 +565,7 @@ function ProjectLanding({ projects }: { projects: readonly ProjectQuickLink[] | 
   if (project === undefined) return <SectionPage eyebrow="Project" title="Project not found" copy="This project is not available in the active organization." />;
   if (error !== null) return <SectionPage eyebrow="Project" title={project.name} copy={error} />;
   if (environments === null) return <SectionPage eyebrow="Project" title={project.name} copy="Loading environments…" />;
-  return <SecretWorkspace key={project.id} projectId={project.id} projectName={project.name} environments={environments} />;
+  return <SecretWorkspace key={project.id} projectId={project.id} projectName={project.name} environments={environments} role={role} onEnvironmentsChange={(rows) => onEnvironmentsChange(project.id, rows)} />;
 }
 
 function SectionPage({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }): ReactNode {

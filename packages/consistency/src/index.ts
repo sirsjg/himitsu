@@ -235,7 +235,7 @@ export class ConsistencyService {
     const [environmentResult, secretResult] = await Promise.all([
       transaction.query<EnvironmentRow>(
         `SELECT id, slug, updated_at FROM environments
-         WHERE project_id = $1 AND deleted_at IS NULL ORDER BY id`,
+         WHERE project_id = $1 AND deleted_at IS NULL ORDER BY display_order, id`,
         [projectId],
       ),
       transaction.query<SecretRow>(

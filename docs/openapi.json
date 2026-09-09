@@ -2301,6 +2301,7 @@
                           "settings",
                           "tagIds",
                           "tags",
+                          "environments",
                           "archivedAt",
                           "deletedAt",
                           "purgeAfter"
@@ -2375,6 +2376,34 @@
                                 },
                                 "color": {
                                   "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "environments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "id",
+                                "name",
+                                "slug",
+                                "protected"
+                              ],
+                              "properties": {
+                                "id": {
+                                  "type": "string",
+                                  "format": "uuid"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "slug": {
+                                  "type": "string"
+                                },
+                                "protected": {
+                                  "type": "boolean"
                                 }
                               }
                             }
@@ -2582,6 +2611,7 @@
                         "settings",
                         "tagIds",
                         "tags",
+                        "environments",
                         "archivedAt",
                         "deletedAt",
                         "purgeAfter"
@@ -2656,6 +2686,34 @@
                               },
                               "color": {
                                 "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "environments": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "id",
+                              "name",
+                              "slug",
+                              "protected"
+                            ],
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "slug": {
+                                "type": "string"
+                              },
+                              "protected": {
+                                "type": "boolean"
                               }
                             }
                           }
@@ -2809,6 +2867,7 @@
                         "settings",
                         "tagIds",
                         "tags",
+                        "environments",
                         "archivedAt",
                         "deletedAt",
                         "purgeAfter"
@@ -2883,6 +2942,34 @@
                               },
                               "color": {
                                 "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "environments": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "id",
+                              "name",
+                              "slug",
+                              "protected"
+                            ],
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "slug": {
+                                "type": "string"
+                              },
+                              "protected": {
+                                "type": "boolean"
                               }
                             }
                           }
@@ -3081,6 +3168,7 @@
                         "settings",
                         "tagIds",
                         "tags",
+                        "environments",
                         "archivedAt",
                         "deletedAt",
                         "purgeAfter"
@@ -3155,6 +3243,34 @@
                               },
                               "color": {
                                 "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "environments": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "id",
+                              "name",
+                              "slug",
+                              "protected"
+                            ],
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "slug": {
+                                "type": "string"
+                              },
+                              "protected": {
+                                "type": "boolean"
                               }
                             }
                           }
@@ -3306,6 +3422,7 @@
                         "settings",
                         "tagIds",
                         "tags",
+                        "environments",
                         "archivedAt",
                         "deletedAt",
                         "purgeAfter"
@@ -3380,6 +3497,34 @@
                               },
                               "color": {
                                 "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "environments": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "id",
+                              "name",
+                              "slug",
+                              "protected"
+                            ],
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "slug": {
+                                "type": "string"
+                              },
+                              "protected": {
+                                "type": "boolean"
                               }
                             }
                           }

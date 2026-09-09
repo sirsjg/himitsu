@@ -14,7 +14,7 @@ The Projects page shows a first-run checklist when the organization has no proje
 
 Select **New project**, then provide a readable name and a stable lowercase slug. New projects receive development, staging, and protected production environments. Use a separate project when the configuration has a different ownership or deployment lifecycle.
 
-Open the project and confirm that the environment tabs match the systems you intend to deploy. Add custom environments only when they represent a real deployment target.
+Open the project and confirm that the environment tabs match the systems you intend to deploy. Select **Manage** at the end of the tab row to add, rename, reorder, protect, or delete environments; the order you set there drives the tabs and the cross-environment matrix. Add custom environments only when they represent a real deployment target.
 
 ## 3. Import an existing `.env`
 
