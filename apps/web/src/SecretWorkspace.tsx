@@ -170,7 +170,7 @@ export interface SecretClient {
   list(projectId: string, environmentId: string): Promise<readonly ApiSecretMetadata[]>;
   reveal(secretId: string): Promise<ApiSecretValue>;
   create(projectId: string, environmentId: string, input: BulkSecretInput & { notes?: string | null }): Promise<ApiSecretMetadata>;
-  update(secretId: string, expectedVersion: number, input: { value: string; notes?: string | null; changeNote?: string; tagIds?: readonly string[] }): Promise<ApiSecretMetadata>;
+  update(secretId: string, expectedVersion: number, input: { value?: string; notes?: string | null; changeNote?: string; tagIds?: readonly string[] }): Promise<ApiSecretMetadata>;
   listTags(): Promise<readonly TagView[]>;
   bulkSet(projectId: string, environmentId: string, secrets: readonly BulkSecretInput[]): Promise<readonly ApiSecretMetadata[]>;
   previewDotenv(projectId: string, environmentId: string, content: string): Promise<DotenvPreviewView>;
@@ -433,12 +433,13 @@ export function SecretWorkspace({
     setNotice(null);
     if (editor?.mode === "edit" && editor.secret !== undefined) {
       const before = editor.secret;
+      const replacesValue = values.value !== "";
       const optimistic: SecretView = {
         id: before.id,
         environmentId: before.environmentId,
         key: before.key,
         notes: values.notes || null,
-        currentVersion: before.currentVersion + 1,
+        currentVersion: before.currentVersion + (replacesValue ? 1 : 0),
         updatedAt: new Date().toISOString(),
         tags: availableTags.filter(({ id }) => values.tagIds.includes(id)).map(({ name }) => name),
         tagIds: values.tagIds,
@@ -446,13 +447,13 @@ export function SecretWorkspace({
       };
       setSecrets((current) => current.map((row) => row.id === before.id ? optimistic : row));
       setEditor(null);
-      remask(before.id);
+      if (replacesValue) remask(before.id);
       try {
         const saved = await client.update(before.id, before.currentVersion, {
-          value: values.value,
+          ...(replacesValue ? { value: values.value } : {}),
           notes: values.notes || null,
           tagIds: values.tagIds,
-          ...(values.changeNote ? { changeNote: values.changeNote } : {}),
+          ...(replacesValue && values.changeNote ? { changeNote: values.changeNote } : {}),
         });
         setSecrets((current) => current.map((row) => row.id === before.id ? metadataToView(saved) : row));
         setNotice({ kind: "success", message: `${before.key} updated.` });
@@ -618,6 +619,22 @@ export function promotionMarker(
   return "target-only";
 }
 
+/**
+ * Findings that belong on one matrix cell. `environmentIds` always lists the environments a finding
+ * was raised *about*, which for missing_key is the ones that HOLD the key — badging those marks the
+ * environment a secret was just added to as missing it. The cells that genuinely lack the key already
+ * read "missing · needs copy", so missing_key needs no badge of its own on either side.
+ */
+export function cellFindings(
+  findings: ConsistencyReportView["findings"],
+  keys: readonly string[],
+  environmentId: string,
+): ConsistencyReportView["findings"] {
+  return findings.filter((finding) => (keys.includes(finding.key) || finding.keys.some((key) => keys.includes(key)))
+    && finding.type !== "missing_key"
+    && finding.environmentIds.includes(environmentId));
+}
+
 function findingLabel(type: ConsistencyReportView["findings"][number]["type"]): string {
   return ({ missing_key: "missing", empty_value: "empty", placeholder_value: "placeholder", naming_violation: "naming", case_duplicate: "case conflict" })[type];
 }
@@ -637,6 +654,7 @@ function ConsistencyHealthPanel({ report, environments, error, diffError, source
   const environmentById = new Map(environments.map((environment) => [environment.id, environment]));
   const availableTargets = environments.filter(({ id }) => id !== sourceEnvironmentId);
   const [targetEnvironmentId, setTargetEnvironmentId] = useState(availableTargets[0]?.id ?? "");
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     if (targetEnvironmentId === sourceEnvironmentId || !availableTargets.some(({ id }) => id === targetEnvironmentId)) {
       setTargetEnvironmentId(availableTargets[0]?.id ?? "");
@@ -644,14 +662,15 @@ function ConsistencyHealthPanel({ report, environments, error, diffError, source
   }, [sourceEnvironmentId, targetEnvironmentId, environments]);
   const targetPreview = previews[targetEnvironmentId];
   return <section className="health-panel" aria-label="Project consistency health">
-    <header><div><span className="kicker">Cross-environment diff</span><h2>{report?.summary.healthy ? "Environments aligned" : "Configuration drift"}</h2></div><div className="health-summary"><strong>{report?.summary.activeFindings ?? "—"}<span>active findings</span></strong><strong>{report?.summary.exitCode ?? "—"}<span>CI exit code</span></strong><button type="button" onClick={onRefresh}>Refresh</button></div></header>
+    <header><div><span className="kicker">Cross-environment diff</span><h2>{report?.summary.healthy ? "Environments aligned" : "Configuration drift"}</h2></div><div className="health-summary"><strong>{report?.summary.activeFindings ?? "—"}<span>active findings</span></strong><strong>{report?.summary.exitCode ?? "—"}<span>CI exit code</span></strong><button type="button" onClick={onRefresh}>Refresh</button><button className="health-toggle" type="button" aria-expanded={open} aria-controls="health-detail" onClick={() => setOpen((current) => !current)}>{open ? "Hide details" : "Show details"}<i aria-hidden="true" /></button></div></header>
+    {error ? <p className="health-error" role="alert">{error}</p> : null}
+    <div id="health-detail" hidden={!open}>
     <div className="diff-controls">
       <label>Baseline environment<Select aria-label="Baseline environment" value={sourceEnvironmentId} onValueChange={(value) => onSourceChange(value)} options={environments.map((environment) => ({ value: environment.id, label: environment.name }))} /></label>
       <span>Compare encrypted values without revealing them. Promote one key or the full baseline.</span>
       <label>Promotion target<Select aria-label="Promotion target" value={targetEnvironmentId} onValueChange={(value) => setTargetEnvironmentId(value)} options={availableTargets.map((environment) => ({ value: environment.id, label: `${environment.name}${environment.protected ? " · protected" : ""}` }))} /></label>
       <button type="button" disabled={targetPreview === undefined || targetPreview.summary.selected === 0} onClick={() => onPromote(targetEnvironmentId)}>Review full promotion</button>
     </div>
-    {error ? <p className="health-error" role="alert">{error}</p> : null}
     {diffError ? <p className="health-warning" role="status">Some value comparisons are unavailable: {diffError}</p> : null}
     {report === null && error === null ? <p className="health-loading">Computing value-safe matrix…</p> : null}
     {report ? <div className="health-matrix" role="table" aria-label="Key by environment consistency matrix">
@@ -659,10 +678,11 @@ function ConsistencyHealthPanel({ report, environments, error, diffError, source
       {report.matrix.map((row) => <div className="health-matrix-row" role="row" key={row.key} style={{ gridTemplateColumns: `minmax(190px, 1.4fr) repeat(${report.environments.length}, minmax(130px, 1fr))` }}><code role="cell">{row.key}</code>{row.cells.map((cell) => {
         const item = previews[cell.environmentId]?.items.find((candidate) => row.keys.includes(candidate.key));
         const marker = promotionMarker(sourceEnvironmentId, cell, item);
-        const findings = report.findings.filter((finding) => row.keys.includes(finding.key) || finding.keys.some((key) => row.keys.includes(key))).filter((finding) => finding.environmentIds.includes(cell.environmentId) || finding.missingEnvironmentIds.includes(cell.environmentId));
+        const findings = cellFindings(report.findings, row.keys, cell.environmentId);
         return <div role="cell" key={cell.environmentId} className={`health-cell ${cell.state} diff-${marker}`}><span>{cell.state}</span><em>{marker === "source" ? "baseline" : marker === "changed" ? "value changed" : marker === "same" ? "values match" : marker === "target-only" ? "target only" : "needs copy"}</em>{findings.map((finding) => <small key={finding.id} className={finding.severity}>{findingLabel(finding.type)}</small>)}{item !== undefined && cell.environmentId !== sourceEnvironmentId && (item.action === "create" || item.changed || cell.state === "empty") ? <button type="button" onClick={() => onPromote(cell.environmentId, [item.key])}>Promote</button> : cell.state !== "present" && cell.environmentId === sourceEnvironmentId ? <button type="button" onClick={() => onFix(row.key, cell)}>Add</button> : null}</div>;
       })}</div>)}
     </div> : null}
+    </div>
     {report ? <footer><span>{report.summary.errors} errors · {report.summary.warnings} warnings</span><span>Presence and change markers only · values never leave the vault</span></footer> : null}
   </section>;
 }
@@ -701,15 +721,16 @@ function SecretEditor({ mode, secret, initialKey, availableTags, onCancel, onSav
   onSave: (values: { key: string; value: string; notes: string; allowNonConformingKey: boolean; changeNote: string; tagIds: readonly string[] }) => Promise<void>;
 }): ReactNode {
   const [key, setKey] = useState(secret?.key ?? initialKey ?? "");
+  const [value, setValue] = useState("");
   const [allowNonConformingKey, setAllowNonConformingKey] = useState(false);
   const [tagIds, setTagIds] = useState<ReadonlySet<string>>(new Set(secret?.tagIds ?? []));
   const conventional = isConventionalSecretKey(key);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    void onSave({ key, value: String(data.get("value") ?? ""), notes: String(data.get("notes") ?? ""), changeNote: String(data.get("changeNote") ?? ""), allowNonConformingKey, tagIds: [...tagIds] });
+    void onSave({ key, value, notes: String(data.get("notes") ?? ""), changeNote: String(data.get("changeNote") ?? ""), allowNonConformingKey, tagIds: [...tagIds] });
   };
-  return <form className="editor-sheet inline-secret-editor" aria-label={`${mode === "add" ? "Add" : "Edit"} secret`} onSubmit={submit}><header><div><span className="kicker">{mode === "add" ? "New encrypted value" : `Version ${secret?.currentVersion ?? ""}`}</span><h2>{mode === "add" ? "Add a secret" : `Update ${secret?.key ?? "secret"}`}</h2></div><button type="button" aria-label="Close editor" onClick={onCancel}>×</button></header><label>Key<input name="key" value={key} disabled={mode === "edit"} onChange={(event) => setKey(event.target.value)} required maxLength={255} autoFocus={mode === "add"} /><small className={conventional || key === "" ? "key-hint" : "key-hint warning"}>{conventional || key === "" ? "Use UPPERCASE_SNAKE_CASE, for example DATABASE_URL." : "This key does not follow UPPERCASE_SNAKE_CASE."}</small></label>{!conventional && key !== "" && mode === "add" ? <label className="check-row"><input type="checkbox" checked={allowNonConformingKey} onChange={(event) => setAllowNonConformingKey(event.target.checked)} /> Keep this non-standard key</label> : null}<label>{mode === "add" ? "Value" : "Replacement value"}<textarea name="value" required rows={5} spellCheck={false} autoComplete="off" placeholder="Secret value (never shown after save)" /></label><label>Note <span>optional</span><input name="notes" defaultValue={secret?.notes ?? ""} maxLength={4000} placeholder="What uses this secret?" /></label>{mode === "edit" ? <label>Change note <span>optional</span><input name="changeNote" maxLength={1000} placeholder="Why is this value changing?" /></label> : null}{availableTags.length > 0 ? <fieldset className="tag-picker"><legend>Tags <span>optional</span></legend>{availableTags.map((tag) => <label key={tag.id}><input type="checkbox" checked={tagIds.has(tag.id)} onChange={() => setTagIds((current) => { const next = new Set(current); if (next.has(tag.id)) next.delete(tag.id); else next.add(tag.id); return next; })} /><span style={{ borderColor: tag.color }}>#{tag.name}</span></label>)}</fieldset> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit" disabled={key.trim() === "" || (!conventional && !allowNonConformingKey && mode === "add")}>{mode === "add" ? "Encrypt & save" : "Create new version"}</button></footer></form>;
+  return <form className="editor-sheet inline-secret-editor" aria-label={`${mode === "add" ? "Add" : "Edit"} secret`} onSubmit={submit}><header><div><span className="kicker">{mode === "add" ? "New encrypted value" : `Version ${secret?.currentVersion ?? ""}`}</span><h2>{mode === "add" ? "Add a secret" : `Update ${secret?.key ?? "secret"}`}</h2></div><button type="button" aria-label="Close editor" onClick={onCancel}>×</button></header><label>Key<input name="key" value={key} disabled={mode === "edit"} onChange={(event) => setKey(event.target.value)} required maxLength={255} autoFocus={mode === "add"} /><small className={conventional || key === "" ? "key-hint" : "key-hint warning"}>{conventional || key === "" ? "Use UPPERCASE_SNAKE_CASE, for example DATABASE_URL." : "This key does not follow UPPERCASE_SNAKE_CASE."}</small></label>{!conventional && key !== "" && mode === "add" ? <label className="check-row"><input type="checkbox" checked={allowNonConformingKey} onChange={(event) => setAllowNonConformingKey(event.target.checked)} /> Keep this non-standard key</label> : null}<label>{mode === "add" ? "Value" : <>New value <span>optional</span></>}<textarea name="value" value={value} onChange={(event) => setValue(event.target.value)} required={mode === "add"} rows={5} spellCheck={false} autoComplete="off" placeholder="Secret value" />{mode === "edit" ? <small className="key-hint">Leave blank to keep the current value and only update the details below.</small> : null}</label><label>Note <span>optional</span><input name="notes" defaultValue={secret?.notes ?? ""} maxLength={4000} placeholder="What uses this secret?" /></label>{mode === "edit" && value !== "" ? <label>Change note <span>optional</span><input name="changeNote" maxLength={1000} placeholder="Why is this value changing?" /></label> : null}{availableTags.length > 0 ? <fieldset className="tag-picker"><legend>Tags <span>optional</span></legend>{availableTags.map((tag) => <label key={tag.id}><input type="checkbox" checked={tagIds.has(tag.id)} onChange={() => setTagIds((current) => { const next = new Set(current); if (next.has(tag.id)) next.delete(tag.id); else next.add(tag.id); return next; })} /><span style={{ borderColor: tag.color }}>#{tag.name}</span></label>)}</fieldset> : null}<footer><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit" disabled={key.trim() === "" || (!conventional && !allowNonConformingKey && mode === "add")}>{mode === "add" ? "Encrypt & save" : value === "" ? "Save changes" : "Create new version"}</button></footer></form>;
 }
 
 function SecretExportDialog({ projectId, environmentId, client, onCancel, onExported }: {

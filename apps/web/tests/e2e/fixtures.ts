@@ -7,7 +7,14 @@ async function json(route: Route, data: unknown, status = 200): Promise<void> {
 }
 
 export async function installApi(page: Page, populated = false): Promise<void> {
-  const keys = new Set<string>(populated ? ["DATABASE_URL", "REDIS_URL", "SENTRY_DSN"] : []);
+  interface SecretRow { id: string; key: string; notes: string | null; currentVersion: number }
+  const secretRows: SecretRow[] = (populated ? ["DATABASE_URL", "REDIS_URL", "SENTRY_DSN"] : [])
+    .map((key, index) => ({ id: `secret-${index + 1}`, key, notes: null, currentVersion: 1 }));
+  const sortedKeys = (): string[] => secretRows.map(({ key }) => key).sort();
+  const secretMetadata = (row: SecretRow) => ({
+    id: row.id, orgId: "org-studio", projectId: "e2e-project", environmentId: "development",
+    key: row.key, notes: row.notes, currentVersion: row.currentVersion, updatedAt: now, tagIds: [], tags: [],
+  });
   const createdProjects: Array<Record<string, unknown>> = populated ? [
     { id: "e2e-project", name: "Payments API", slug: "payments-api", settings: { defaultEnvironments: ["development", "staging", "production"] }, tags: [{ name: "platform" }] },
     { id: "web-project", name: "Customer portal", slug: "customer-portal", settings: { defaultEnvironments: ["development", "staging", "production"] }, tags: [{ name: "customer" }] },
@@ -20,7 +27,14 @@ export async function installApi(page: Page, populated = false): Promise<void> {
     { id: "production", name: "Production", slug: "production", displayOrder: 2, protected: true },
   ];
   const environmentRow = (row: typeof environments[number]) => ({ ...row, orgId: "org-studio", projectId: "e2e-project", deletedAt: null, purgeAfter: null });
-  let nextSecret = 1;
+  let nextSecret = secretRows.length + 1;
+  const addSecret = (key: string): SecretRow => {
+    const existing = secretRows.find((row) => row.key === key);
+    if (existing !== undefined) return existing;
+    const row: SecretRow = { id: `secret-${nextSecret++}`, key, notes: null, currentVersion: 1 };
+    secretRows.push(row);
+    return row;
+  };
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -59,7 +73,7 @@ export async function installApi(page: Page, populated = false): Promise<void> {
       return json(route, environmentRow(targetEnvironment));
     }
     if (targetEnvironment !== undefined && request.method() === "DELETE") {
-      const holdsSecrets = targetEnvironment.id === "development" && keys.size > 0;
+      const holdsSecrets = targetEnvironment.id === "development" && secretRows.length > 0;
       if (holdsSecrets && new URL(request.url()).searchParams.get("confirmSecrets") !== "true") {
         return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: { code: "SECRETS_REQUIRE_CONFIRMATION", message: "Confirm deletion because this environment contains active secrets" } }) });
       }
@@ -67,7 +81,16 @@ export async function installApi(page: Page, populated = false): Promise<void> {
       return json(route, environmentRow(targetEnvironment));
     }
     if (path.endsWith("/secrets") && request.method() === "GET") {
-      return json(route, [...keys].sort().map((key, index) => ({ id: `secret-${index + 1}`, orgId: "org-studio", projectId: "e2e-project", environmentId: "development", key, notes: null, currentVersion: 1, updatedAt: now, tagIds: [], tags: [] })));
+      return json(route, [...secretRows].sort((left, right) => left.key.localeCompare(right.key)).map(secretMetadata));
+    }
+    const secretMatch = /^\/api\/v1\/secrets\/([^/]+)$/.exec(path);
+    const targetSecret = secretMatch === null ? undefined : secretRows.find(({ id }) => id === secretMatch[1]);
+    if (targetSecret !== undefined && request.method() === "PATCH") {
+      const body = request.postDataJSON() as { value?: string; notes?: string | null };
+      targetSecret.notes = body.notes ?? null;
+      // Only a replacement value writes a new version; notes and tags edit in place.
+      if (body.value !== undefined) targetSecret.currentVersion += 1;
+      return json(route, secretMetadata(targetSecret));
     }
     if (path === "/api/v1/organization") return json(route, { id: "org-studio", name: "Northstar Studio", slug: "northstar-studio", retentionDays: 90, createdAt: now, updatedAt: now });
     if (path === "/api/v1/members") return json(route, [{ userId: "e2e-user", email: "owner@example.com", role: "owner", status: "active", createdAt: now, updatedAt: now }]);
@@ -86,7 +109,7 @@ export async function installApi(page: Page, populated = false): Promise<void> {
     }
     if (path === "/api/v1/tags" && request.method() === "GET") return json(route, []);
     if (path.endsWith("/consistency")) {
-      const matrix = [...keys].sort().map((key) => ({
+      const matrix = sortedKeys().map((key) => ({
         key,
         keys: [key],
         cells: [
@@ -106,13 +129,14 @@ export async function installApi(page: Page, populated = false): Promise<void> {
     }
     if (path.endsWith("/promotions/preview")) {
       const targetEnvironmentId = path.split("/").at(-3) ?? "staging";
-      const items = [...keys].sort().map((key) => ({ key, action: "create", changed: true, sourceVersion: 1, targetVersion: null }));
+      const items = sortedKeys().map((key) => ({ key, action: "create", changed: true, sourceVersion: 1, targetVersion: null }));
       return json(route, { sourceEnvironmentId: "development", targetEnvironmentId, items, summary: { selected: items.length, created: items.length, overwritten: 0 } });
     }
     if (path.endsWith("/secrets") && request.method() === "POST") {
-      const body = request.postDataJSON() as { key: string };
-      keys.add(body.key);
-      return json(route, { id: `secret-${nextSecret++}`, environmentId: "development", key: body.key, notes: null, currentVersion: 1, updatedAt: now, tagIds: [], tags: [] }, 201);
+      const body = request.postDataJSON() as { key: string; notes?: string | null };
+      const created = addSecret(body.key);
+      created.notes = body.notes ?? null;
+      return json(route, secretMetadata(created), 201);
     }
     if (path.endsWith("/imports/dotenv/preview")) {
       return json(route, {
@@ -125,10 +149,8 @@ export async function installApi(page: Page, populated = false): Promise<void> {
       });
     }
     if (path.endsWith("/imports/dotenv")) {
-      keys.add("REDIS_URL");
-      keys.add("SENTRY_DSN");
       return json(route, {
-        secrets: ["REDIS_URL", "SENTRY_DSN"].map((key) => ({ id: `secret-${nextSecret++}`, environmentId: "development", key, notes: null, currentVersion: 1, updatedAt: now, tagIds: [], tags: [] })),
+        secrets: ["REDIS_URL", "SENTRY_DSN"].map((key) => secretMetadata(addSecret(key))),
         summary: { created: 2, updated: 0, skipped: 0 },
       });
     }

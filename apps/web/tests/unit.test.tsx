@@ -13,6 +13,7 @@ import {
 } from "../src/App.js";
 import {
   SecretConflictError,
+  cellFindings,
   createSecretClient,
   filterSecretRows,
   isConventionalSecretKey,
@@ -364,10 +365,13 @@ test("secret client targets v1 routes, sends optimistic version preconditions, a
   assert.equal(calls[0]?.init?.method, "PATCH");
   assert.equal(new Headers(calls[0]?.init?.headers).get("if-match"), '"3"');
   assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { value: "replacement", changeNote: "rotation" });
+  // A details-only edit sends no value, which is what keeps the stored secret.
+  await client.update("secret-id", 4, { notes: "billing worker", tagIds: [] });
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { notes: "billing worker", tagIds: [] });
   await client.listTags();
-  assert.equal(calls[1]?.input, "/api/v1/tags?limit=100");
+  assert.equal(calls[2]?.input, "/api/v1/tags?limit=100");
   await client.exportSecrets("project/id", "environment/id", "json", true, "--");
-  assert.equal(calls[2]?.input, "/api/v1/projects/project%2Fid/environments/environment%2Fid/exports?format=json&nested=true&delimiter=--");
+  assert.equal(calls[3]?.input, "/api/v1/projects/project%2Fid/environments/environment%2Fid/exports?format=json&nested=true&delimiter=--");
 
   const conflicting = createSecretClient(async () => new Response(
     JSON.stringify({ error: { message: "Version is stale" } }),
@@ -409,6 +413,17 @@ test("promotion markers distinguish baseline, missing, changed, matching, and ta
   assert.equal(promotionMarker("source", present, item), "changed");
   assert.equal(promotionMarker("source", present, { ...item, changed: false }), "same");
   assert.equal(promotionMarker("source", present), "target-only");
+});
+
+test("matrix badges flag only the environments a finding implicates", () => {
+  const missing = { id: "missing-API_URL", type: "missing_key" as const, severity: "error" as const, key: "API_URL", keys: ["API_URL"], environmentIds: ["development"], missingEnvironmentIds: ["staging"], disposition: null };
+  const empty = { ...missing, id: "empty-API_URL", type: "empty_value" as const, missingEnvironmentIds: [] };
+  const findings = [missing, empty];
+  // missing_key lists the environments that hold the key, so badging environmentIds would mark
+  // development — where the secret actually lives — as missing it.
+  assert.deepEqual(cellFindings(findings, ["API_URL"], "development").map(({ id }) => id), ["empty-API_URL"]);
+  assert.deepEqual(cellFindings(findings, ["API_URL"], "staging"), []);
+  assert.deepEqual(cellFindings(findings, ["DATABASE_URL"], "development"), []);
 });
 
 test("promotion client previews and commits selected or full environment copies", async () => {

@@ -1922,7 +1922,7 @@ function registerSecretRoutes(
   app.patch("/api/v1/secrets/:secretId", {
     schema: {
       operationId: "updateSecret", tags: ["secrets"], params: secretParams,
-      body: { type: "object", additionalProperties: false, required: ["value"], properties: { value: { type: "string" }, notes: { type: ["string", "null"], maxLength: 4000 }, changeNote: { type: ["string", "null"], maxLength: 1000 }, tagIds: { type: "array", maxItems: 50, uniqueItems: true, items: uuid } } },
+      body: { type: "object", additionalProperties: false, properties: { value: { type: "string" }, notes: { type: ["string", "null"], maxLength: 4000 }, changeNote: { type: ["string", "null"], maxLength: 1000 }, tagIds: { type: "array", maxItems: 50, uniqueItems: true, items: uuid } } },
       response: apiResponses(secretMetadataSchema),
     },
   }, async (request) => {

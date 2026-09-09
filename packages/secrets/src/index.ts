@@ -661,7 +661,7 @@ export class SecretService {
     transaction: TenantTransaction,
     actorUserId: string,
     secretId: string,
-    input: { value: string; notes?: string | null; changeNote?: string | null; expectedVersion?: number; tagIds?: readonly string[] },
+    input: { value?: string; notes?: string | null; changeNote?: string | null; expectedVersion?: number; tagIds?: readonly string[] },
   ): Promise<SecretMetadata> {
     const before = await this.#metadataRow(transaction, secretId, true);
     const environment = await this.#environment(transaction, before.project_id, before.environment_id);
@@ -680,7 +680,13 @@ export class SecretService {
         `Secret is at version ${before.current_version}; refresh before replacing version ${input.expectedVersion}`,
       );
     }
-    return this.#writeVersion(transaction, actorUserId, before, input, "secret.updated");
+    if (input.value === undefined) {
+      if (input.changeNote !== undefined && input.changeNote !== null && input.changeNote !== "") {
+        throw new SecretError("INVALID_INPUT", "A change note only applies to a replacement value");
+      }
+      return this.#writeMetadata(transaction, actorUserId, before, input);
+    }
+    return this.#writeVersion(transaction, actorUserId, before, { ...input, value: input.value }, "secret.updated");
   }
 
   async bulkSet(
@@ -1024,6 +1030,36 @@ export class SecretService {
       }
       throw error;
     }
+  }
+
+  async #writeMetadata(
+    transaction: TenantTransaction,
+    actorUserId: string,
+    before: SecretRow,
+    input: { notes?: string | null; tagIds?: readonly string[] },
+  ): Promise<SecretMetadata> {
+    const notes = input.notes === undefined ? before.notes : validateNotes(input.notes);
+    const updated = await transaction.query<SecretRow>(
+      `UPDATE secrets SET notes = $1, updated_at = now()
+       WHERE id = $2 AND deleted_at IS NULL
+       RETURNING id, org_id, project_id, environment_id, key, notes,
+                 current_version, created_at, updated_at`,
+      [notes, before.id],
+    );
+    const row = updated.rows[0];
+    if (row === undefined) throw new SecretError("NOT_FOUND", "Secret not found");
+    if (input.tagIds !== undefined) await this.#replaceTags(transaction, row, input.tagIds);
+    await this.#audit.recordInTransaction(transaction, {
+      orgId: transaction.orgId,
+      actor: { type: "user", id: actorUserId },
+      action: "secret.updated",
+      resource: { type: "secret", id: row.id },
+      projectId: row.project_id,
+      environmentId: row.environment_id,
+      before: { key: before.key, version: before.current_version, notesPresent: before.notes !== null },
+      after: { key: row.key, version: row.current_version, notesPresent: row.notes !== null, valueChanged: false },
+    });
+    return metadataFromRow(await this.#metadataRow(transaction, row.id));
   }
 
   async #writeVersion(
