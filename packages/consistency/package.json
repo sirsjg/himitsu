@@ -29,6 +29,6 @@
     "@himitsu/crypto": "0.0.0",
     "@himitsu/secrets": "0.0.0",
     "@himitsu/tenancy": "0.0.0",
-    "pg": "^8.16.3"
+    "pg": "^8.23.0"
   }
 }
