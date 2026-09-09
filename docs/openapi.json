@@ -9750,9 +9750,6 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "value"
-                ],
                 "properties": {
                   "value": {
                     "type": "string"

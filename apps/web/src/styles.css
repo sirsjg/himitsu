@@ -295,6 +295,9 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .health-summary strong span { color: var(--faint); font-size: var(--text-2xs); font-weight: 400; text-transform: uppercase; letter-spacing: var(--tracking-caps); }
 .health-summary button, .health-cell button { border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; font-family: var(--font-mono); font-size: var(--text-xs); cursor: pointer; }
 .health-summary button { height: 31px; padding: 0 10px; }
+.health-toggle { display: inline-flex; align-items: center; gap: 7px; }
+.health-toggle i { width: 6px; height: 6px; margin-top: -3px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg); transition: transform .15s ease; }
+.health-toggle[aria-expanded="true"] i { margin-top: 3px; transform: rotate(225deg); }
 .health-summary button:hover, .health-cell button:hover { color: var(--accent-text); border-color: var(--accent); }
 .diff-controls { min-height: 58px; display: grid; grid-template-columns: minmax(150px, 1fr) minmax(160px, 1.1fr) minmax(150px, 1fr) auto; align-items: center; gap: 13px; padding: 9px 13px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2) 60%, var(--surface)); }
 .diff-controls label { display: grid; gap: 4px; color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
@@ -310,8 +313,8 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .health-matrix-head { position: sticky; z-index: 1; top: 0; color: var(--faint); background: var(--surface-2); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
 .health-cell { justify-content: flex-start; align-content: flex-start; flex-wrap: wrap; gap: 5px 7px; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; }
 .health-cell::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-.health-cell span { margin-right: auto; }
-.health-cell em { width: 100%; padding-left: 14px; color: var(--faint); font-size: var(--text-2xs); font-style: normal; letter-spacing: .04em; }
+.health-cell span { flex-shrink: 0; }
+.health-cell em { color: var(--faint); font-size: var(--text-2xs); font-style: normal; letter-spacing: .04em; }
 .health-cell.diff-changed em { color: var(--warning); }
 .health-cell.diff-same em { color: var(--accent-text); }
 .health-cell small { padding: 2px 4px; border-radius: 3px; font-size: var(--text-2xs); font-weight: var(--weight-semibold); }
@@ -320,7 +323,7 @@ kbd { min-width: 23px; padding: 3px 5px; border: 1px solid var(--line-strong); b
 .health-cell.missing, .health-cell.empty { color: var(--danger); background: color-mix(in srgb, var(--danger) 4%, transparent); }
 .health-cell.missing::before { background: transparent; box-shadow: inset 0 0 0 1px var(--danger); }
 .health-cell.empty::before { background: var(--danger); }
-.health-cell button { padding: 4px 6px; color: currentColor; border-color: color-mix(in srgb, currentColor 30%, var(--line)); }
+.health-cell button { margin-left: auto; flex-shrink: 0; padding: 4px 6px; color: currentColor; border-color: color-mix(in srgb, currentColor 30%, var(--line)); }
 .health-panel > footer { min-height: 35px; display: flex; align-items: center; justify-content: space-between; padding: 6px 13px; color: var(--faint); background: var(--surface-2); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
 .health-error, .health-loading, .health-warning { margin: 0; padding: 10px 17px; color: var(--muted); font-size: var(--text-xs); }
 .health-error { color: var(--danger); }

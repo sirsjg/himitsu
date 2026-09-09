@@ -44,6 +44,18 @@ test("login, project creation, secret writes, dotenv import, diff, audit, and se
   // The plaintext must never reach the document until explicitly revealed.
   await expect(page.locator("body")).not.toContainText("postgres://db/app");
 
+  // A note-only edit must keep the stored value: the form submits without a
+  // replacement value and the row stays on version 1.
+  await page.getByRole("button", { name: "Edit DATABASE_URL" }).click();
+  const noteEditor = page.getByRole("form", { name: "Edit secret" });
+  await expect(noteEditor.getByLabel("New value")).toHaveValue("");
+  await noteEditor.getByLabel("Note optional").fill("Primary database connection");
+  await expect(noteEditor.getByLabel("Change note optional")).toBeHidden();
+  await noteEditor.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status")).toContainText("DATABASE_URL updated.");
+  await expect(page.getByText("Primary database connection")).toBeVisible();
+  await expect(page.locator(".version-button")).toHaveText("v1");
+
   await page.getByRole("button", { name: "Bulk paste" }).click();
   const importer = page.getByRole("dialog", { name: "Import secrets" });
   await importer.getByLabel("Paste dotenv content").fill("REDIS_URL=redis://cache\nSENTRY_DSN=https://example@sentry.invalid/1");
@@ -53,6 +65,7 @@ test("login, project creation, secret writes, dotenv import, diff, audit, and se
   await commitImport.click();
   await expect(page.getByRole("status")).toContainText("Import complete: 2 added");
 
+  await page.getByRole("button", { name: "Show details" }).click();
   await expect(page.getByRole("table", { name: "Key by environment consistency matrix" })).toContainText("SENTRY_DSN");
   await expect(page.getByText("needs copy").first()).toBeVisible();
   await page.getByRole("link", { name: "Audit" }).click();

@@ -232,6 +232,34 @@ test("updates values immutably and enforces key, value, and uniqueness validatio
   );
 });
 
+test("updates notes and tags without replacing the value or creating a version", async () => {
+  await database.withOrg(orgA, memberA, async (transaction) => {
+    const before = await secrets.get(transaction, memberA, databaseSecretId);
+    const versionsBefore = await transaction.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM secret_versions WHERE secret_id = $1",
+      [databaseSecretId],
+    );
+    const updated = await secrets.update(transaction, memberA, databaseSecretId, {
+      notes: "used by the billing worker",
+      expectedVersion: before.currentVersion,
+    });
+    assert.equal(updated.currentVersion, before.currentVersion);
+    assert.equal(updated.notes, "used by the billing worker");
+    assert.equal((await secrets.get(transaction, memberA, databaseSecretId)).value, before.value);
+    assert.deepEqual(
+      (await transaction.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM secret_versions WHERE secret_id = $1",
+        [databaseSecretId],
+      )).rows[0],
+      versionsBefore.rows[0],
+    );
+    await assert.rejects(
+      secrets.update(transaction, memberA, databaseSecretId, { changeNote: "no value to explain" }),
+      (error: unknown) => error instanceof SecretError && error.code === "INVALID_INPUT",
+    );
+  });
+});
+
 test("applies protected-environment and project-override authorization", async () => {
   await assert.rejects(
     database.withOrg(orgA, memberA, (transaction) =>
