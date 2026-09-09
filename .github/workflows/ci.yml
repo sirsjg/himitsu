@@ -12,8 +12,8 @@ jobs:
   unit-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -52,8 +52,8 @@ jobs:
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/himitsu_test
       TEST_APP_DATABASE_URL: postgresql://himitsu_app:himitsu_app_test@127.0.0.1:5432/himitsu_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -66,8 +66,8 @@ jobs:
   browser-e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -78,7 +78,7 @@ jobs:
   container-packaging:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose --env-file .env.example config --quiet
       - run: docker build --target api --tag himitsu-api:test .
       - run: docker build --target web --tag himitsu-web:test .
@@ -98,8 +98,8 @@ jobs:
       # module cannot be masked by the go.work workspace.
       GOWORK: "off"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache-dependency-path: integrations/${{ matrix.module }}/go.sum
@@ -112,8 +112,8 @@ jobs:
   integrations-operator-manifests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache-dependency-path: integrations/operator/go.sum
@@ -137,8 +137,8 @@ jobs:
       run:
         working-directory: integrations/github-action
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
