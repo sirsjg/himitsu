@@ -27,6 +27,6 @@
     "@himitsu/audit": "0.0.0",
     "@himitsu/authz": "0.0.0",
     "@himitsu/tenancy": "0.0.0",
-    "pg": "^8.16.3"
+    "pg": "^8.23.0"
   }
 }
