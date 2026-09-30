@@ -24,7 +24,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@fastify/swagger": "^9.6.1",
+    "@fastify/swagger": "^9.9.0",
     "@himitsu/api-keys": "0.0.0",
     "@himitsu/audit": "0.0.0",
     "@himitsu/auth": "0.0.0",
@@ -36,7 +36,7 @@
     "@himitsu/projects": "0.0.0",
     "@himitsu/secrets": "0.0.0",
     "@himitsu/tenancy": "0.0.0",
-    "fastify": "^5.10.0",
-    "pg": "^8.16.3"
+    "fastify": "^5.12.5",
+    "pg": "^8.23.0"
   }
 }

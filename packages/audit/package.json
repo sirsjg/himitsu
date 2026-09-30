@@ -24,6 +24,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "pg": "^8.16.3"
+    "pg": "^8.23.0"
   }
 }
